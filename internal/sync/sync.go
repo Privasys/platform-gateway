@@ -29,10 +29,10 @@ type Syncer struct {
 	interval time.Duration
 
 	// Metrics
-	lastSync    time.Time
-	lastErr     error
-	syncCount   int64
-	errorCount  int64
+	lastSync   time.Time
+	lastErr    error
+	syncCount  int64
+	errorCount int64
 }
 
 // New creates a route syncer.

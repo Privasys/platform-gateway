@@ -9,10 +9,10 @@ import (
 )
 
 var (
-	ErrNotTLS        = errors.New("not a TLS record")
+	ErrNotTLS         = errors.New("not a TLS record")
 	ErrNotClientHello = errors.New("not a ClientHello")
-	ErrNoSNI         = errors.New("no SNI extension found")
-	ErrTruncated     = errors.New("truncated TLS record")
+	ErrNoSNI          = errors.New("no SNI extension found")
+	ErrTruncated      = errors.New("truncated TLS record")
 )
 
 // Parse extracts the SNI hostname from a raw TLS ClientHello message.

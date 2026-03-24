@@ -10,14 +10,14 @@ import (
 
 // Config holds all gateway configuration.
 type Config struct {
-	ListenAddr   string        // TCP address to listen on (e.g. ":443")
-	HealthAddr   string        // HTTP address for health/metrics (e.g. ":9090")
-	ManagementURL string       // Management service URL (e.g. "https://api.developer.privasys.org")
-	AuthToken    string        // Bearer token for management service (monitoring+ role)
-	PollInterval time.Duration // How often to sync routes
-	DialTimeout  time.Duration // Timeout for connecting to upstream backends
-	IdleTimeout  time.Duration // Close idle upstream connections after this duration
-	BufferSize   int           // Read buffer size in bytes
+	ListenAddr    string        // TCP address to listen on (e.g. ":443")
+	HealthAddr    string        // HTTP address for health/metrics (e.g. ":9090")
+	ManagementURL string        // Management service URL (e.g. "https://api.developer.privasys.org")
+	AuthToken     string        // Bearer token for management service (monitoring+ role)
+	PollInterval  time.Duration // How often to sync routes
+	DialTimeout   time.Duration // Timeout for connecting to upstream backends
+	IdleTimeout   time.Duration // Close idle upstream connections after this duration
+	BufferSize    int           // Read buffer size in bytes
 }
 
 // Load parses configuration from CLI flags with env var fallbacks.
