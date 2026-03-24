@@ -1,0 +1,39 @@
+[Unit]
+Description=Privasys Platform Gateway (SNI-based L4 proxy)
+Documentation=https://github.com/Privasys/platform-gateway
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=gateway
+Group=gateway
+ExecStart=/usr/local/bin/platform-gateway
+Restart=always
+RestartSec=5
+
+# Environment file with GATEWAY_MANAGEMENT_URL, GATEWAY_AUTH_TOKEN, etc.
+EnvironmentFile=/etc/privasys/gateway.env
+
+# Security hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictNamespaces=true
+
+# Allow binding to privileged ports (443)
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+
+# Resource limits
+LimitNOFILE=65536
+LimitNPROC=4096
+
+[Install]
+WantedBy=multi-user.target
