@@ -4,7 +4,14 @@ package proxy
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
+	"fmt"
 	"log"
+	"math/big"
 	"net"
 	"sync"
 	"sync/atomic"
@@ -42,6 +49,7 @@ type Gateway struct {
 	dialTimeout time.Duration
 	idleTimeout time.Duration
 	bufferSize  int
+	fallbackTLS *tls.Config
 
 	listener net.Listener
 	wg       sync.WaitGroup
@@ -50,13 +58,60 @@ type Gateway struct {
 
 // New creates a gateway.
 func New(table *routetable.Table, listenAddr string, dialTimeout, idleTimeout time.Duration, bufferSize int) *Gateway {
+	tlsCfg, err := selfSignedTLSConfig()
+	if err != nil {
+		log.Printf("warning: could not generate fallback TLS cert, unknown SNI will drop: %v", err)
+	}
 	return &Gateway{
 		table:       table,
 		listenAddr:  listenAddr,
 		dialTimeout: dialTimeout,
 		idleTimeout: idleTimeout,
 		bufferSize:  bufferSize,
+		fallbackTLS: tlsCfg,
 	}
+}
+
+// selfSignedTLSConfig generates an ephemeral self-signed certificate used
+// only to complete a TLS handshake with clients that request an unknown SNI,
+// so that the gateway can return a proper HTTP 404 response.
+func selfSignedTLSConfig() (*tls.Config, error) {
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		return nil, err
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		NotBefore:    time.Now(),
+		NotAfter:     time.Now().Add(10 * 365 * 24 * time.Hour),
+	}
+	certDER, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	if err != nil {
+		return nil, err
+	}
+	return &tls.Config{
+		Certificates: []tls.Certificate{{
+			Certificate: [][]byte{certDER},
+			PrivateKey:  key,
+		}},
+	}, nil
+}
+
+// prefixConn wraps a net.Conn and replays buffered bytes before reading
+// from the underlying connection. This allows the TLS server to re-read
+// the ClientHello that was already consumed for SNI extraction.
+type prefixConn struct {
+	net.Conn
+	buf []byte
+}
+
+func (c *prefixConn) Read(b []byte) (int, error) {
+	if len(c.buf) > 0 {
+		n := copy(b, c.buf)
+		c.buf = c.buf[n:]
+		return n, nil
+	}
+	return c.Conn.Read(b)
 }
 
 // Run starts accepting connections. Blocks until ctx is cancelled.
@@ -128,6 +183,7 @@ func (g *Gateway) handleConn(clientConn net.Conn) {
 	if !ok {
 		connErrors.WithLabelValues("no_route").Inc()
 		log.Printf("no route for SNI %q from %s", hostname, clientConn.RemoteAddr())
+		g.send404(clientConn, buf[:n], hostname)
 		return
 	}
 
@@ -196,6 +252,29 @@ func (g *Gateway) copyWithIdleTimeout(dst, src net.Conn) int64 {
 		}
 	}
 	return total
+}
+
+const http404Body = `<!DOCTYPE html>
+<html><head><title>404 Not Found</title></head>
+<body><h1>404 Not Found</h1><p>The requested application does not exist.</p></body>
+</html>`
+
+// send404 completes a TLS handshake with a self-signed certificate and
+// returns an HTTP 404 response. This allows clients connecting to an
+// unknown SNI to receive a meaningful error instead of a connection reset.
+func (g *Gateway) send404(conn net.Conn, clientHello []byte, hostname string) {
+	if g.fallbackTLS == nil {
+		return
+	}
+	wrapped := &prefixConn{Conn: conn, buf: clientHello}
+	tlsConn := tls.Server(wrapped, g.fallbackTLS)
+	tlsConn.SetDeadline(time.Now().Add(5 * time.Second))
+	if err := tlsConn.Handshake(); err != nil {
+		return
+	}
+	resp := fmt.Sprintf("HTTP/1.1 404 Not Found\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s", len(http404Body), http404Body)
+	tlsConn.Write([]byte(resp))
+	tlsConn.Close()
 }
 
 // ActiveConnections returns the current count of active connections.
