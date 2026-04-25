@@ -42,7 +42,18 @@ var (
 	}, []string{"direction"})
 )
 
-// Gateway is an L4 TCP proxy that routes based on TLS ClientHello SNI.
+// Gateway is an L4/L7 TCP proxy that routes based on TLS ClientHello SNI.
+//
+// For routes with Mode == "" or "splice" it operates as a pure L4 splicer:
+// the TLS handshake completes at the upstream enclave (which presents an
+// RA-TLS leaf cert) and the gateway never sees plaintext.
+//
+// For routes with Mode == "terminate" it terminates inbound TLS using a
+// public Let's Encrypt wildcard certificate, opens an internal RA-TLS
+// connection to the upstream (verifying the enclave's quote per the
+// per-route attestation policy), and reverse-proxies HTTP. This mode lets
+// browsers (which cannot verify RA-TLS) reach enclave apps after a wallet
+// has independently attested the enclave on their behalf.
 type Gateway struct {
 	table       *routetable.Table
 	listenAddr  string
@@ -50,14 +61,23 @@ type Gateway struct {
 	idleTimeout time.Duration
 	bufferSize  int
 	fallbackTLS *tls.Config
+	terminator  Terminator // optional, nil disables terminate mode
 
 	listener net.Listener
 	wg       sync.WaitGroup
 	closed   atomic.Bool
 }
 
-// New creates a gateway.
-func New(table *routetable.Table, listenAddr string, dialTimeout, idleTimeout time.Duration, bufferSize int) *Gateway {
+// Terminator handles the terminate-mode path for a single inbound
+// connection. Implementations are in the terminate package; pass nil to New
+// to disable terminate mode (the gateway will fall back to splice for any
+// route that requests "terminate" and log a warning).
+type Terminator interface {
+	Handle(clientConn net.Conn, clientHello []byte, route routetable.Route)
+}
+
+// New creates a gateway. terminator may be nil to disable terminate mode.
+func New(table *routetable.Table, listenAddr string, dialTimeout, idleTimeout time.Duration, bufferSize int, terminator Terminator) *Gateway {
 	tlsCfg, err := selfSignedTLSConfig()
 	if err != nil {
 		log.Printf("warning: could not generate fallback TLS cert, unknown SNI will drop: %v", err)
@@ -69,6 +89,7 @@ func New(table *routetable.Table, listenAddr string, dialTimeout, idleTimeout ti
 		idleTimeout: idleTimeout,
 		bufferSize:  bufferSize,
 		fallbackTLS: tlsCfg,
+		terminator:  terminator,
 	}
 }
 
@@ -95,6 +116,17 @@ func selfSignedTLSConfig() (*tls.Config, error) {
 			PrivateKey:  key,
 		}},
 	}, nil
+}
+
+// PrefixConn wraps a net.Conn and replays buffered bytes before reading
+// from the underlying connection. This allows the TLS server to re-read
+// the ClientHello that was already consumed for SNI extraction. Exported
+// so the terminate package can reuse it.
+type PrefixConn = prefixConn
+
+// NewPrefixConn returns a PrefixConn that replays buf before reading conn.
+func NewPrefixConn(conn net.Conn, buf []byte) *PrefixConn {
+	return &prefixConn{Conn: conn, buf: buf}
 }
 
 // prefixConn wraps a net.Conn and replays buffered bytes before reading
@@ -179,7 +211,7 @@ func (g *Gateway) handleConn(clientConn net.Conn) {
 		return
 	}
 
-	upstream, ok := g.table.Lookup(hostname)
+	route, ok := g.table.Lookup(hostname)
 	if !ok {
 		connErrors.WithLabelValues("no_route").Inc()
 		log.Printf("no route for SNI %q from %s", hostname, clientConn.RemoteAddr())
@@ -187,11 +219,23 @@ func (g *Gateway) handleConn(clientConn net.Conn) {
 		return
 	}
 
-	// Connect to upstream
-	backendConn, err := net.DialTimeout("tcp", upstream, g.dialTimeout)
+	// Terminate mode: the gateway owns the TLS handshake (LE wildcard cert)
+	// and reverse-proxies HTTP to the enclave over an internal RA-TLS leg.
+	if route.Mode == "terminate" {
+		if g.terminator == nil {
+			connErrors.WithLabelValues("terminate_disabled").Inc()
+			log.Printf("route %q requests terminate mode but terminator is not configured; dropping", hostname)
+			return
+		}
+		g.terminator.Handle(clientConn, buf[:n], route)
+		return
+	}
+
+	// Splice mode (default): pure L4 SNI splice.
+	backendConn, err := net.DialTimeout("tcp", route.Upstream, g.dialTimeout)
 	if err != nil {
 		connErrors.WithLabelValues("dial_upstream").Inc()
-		log.Printf("dial upstream %s for %q: %v", upstream, hostname, err)
+		log.Printf("dial upstream %s for %q: %v", route.Upstream, hostname, err)
 		return
 	}
 	defer backendConn.Close()

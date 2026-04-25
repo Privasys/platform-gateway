@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/x509"
 	"log"
 	"net/http"
 	"os"
@@ -9,11 +10,13 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/Privasys/platform-gateway/internal/certloader"
 	"github.com/Privasys/platform-gateway/internal/config"
 	"github.com/Privasys/platform-gateway/internal/health"
 	"github.com/Privasys/platform-gateway/internal/proxy"
 	"github.com/Privasys/platform-gateway/internal/routetable"
 	routesync "github.com/Privasys/platform-gateway/internal/sync"
+	"github.com/Privasys/platform-gateway/internal/terminate"
 )
 
 // Set at build time via -ldflags
@@ -49,8 +52,39 @@ func main() {
 		WriteTimeout: 5 * time.Second,
 	}
 
+	// Optional terminate-mode handler. Enabled when wildcard cert paths
+	// are configured. Reloads on SIGHUP via certloader's signal handler.
+	var terminator proxy.Terminator
+	if cfg.TLSCertPath != "" {
+		loader, err := certloader.New(cfg.TLSCertPath, cfg.TLSKeyPath)
+		if err != nil {
+			log.Fatalf("certloader: %v", err)
+		}
+		var caPool *x509.CertPool
+		if cfg.UpstreamCA != "" {
+			caBytes, err := os.ReadFile(cfg.UpstreamCA)
+			if err != nil {
+				log.Fatalf("read upstream-ca %s: %v", cfg.UpstreamCA, err)
+			}
+			caPool = x509.NewCertPool()
+			if !caPool.AppendCertsFromPEM(caBytes) {
+				log.Fatalf("upstream-ca: no certificates parsed from %s", cfg.UpstreamCA)
+			}
+		}
+		terminator = terminate.New(terminate.Options{
+			TLSConfig:    loader.TLSConfig(),
+			DialTimeout:  cfg.DialTimeout,
+			IdleTimeout:  cfg.IdleTimeout,
+			CACertPool:   caPool,
+			InsecureSkip: caPool == nil, // no CA pool ⇒ rely on OID policy only
+		})
+		log.Printf("terminate mode enabled (cert=%s key=%s upstream-ca=%q)", cfg.TLSCertPath, cfg.TLSKeyPath, cfg.UpstreamCA)
+	} else {
+		log.Printf("terminate mode disabled (no -tls-cert configured); routes requesting Mode=terminate will be dropped")
+	}
+
 	// L4 gateway
-	gw := proxy.New(table, cfg.ListenAddr, cfg.DialTimeout, cfg.IdleTimeout, cfg.BufferSize)
+	gw := proxy.New(table, cfg.ListenAddr, cfg.DialTimeout, cfg.IdleTimeout, cfg.BufferSize, terminator)
 
 	// Start route syncer in background
 	go syncer.Run(ctx)

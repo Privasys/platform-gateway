@@ -11,7 +11,7 @@ func TestLookup(t *testing.T) {
 	}
 	table.Update(routes, "v1")
 
-	upstream, ok := table.Lookup("app1.apps.privasys.org")
+	upstream, ok := table.LookupUpstream("app1.apps.privasys.org")
 	if !ok {
 		t.Fatal("expected route for app1")
 	}
@@ -19,7 +19,7 @@ func TestLookup(t *testing.T) {
 		t.Errorf("got %q, want 141.94.219.130:8445", upstream)
 	}
 
-	_, ok = table.Lookup("unknown.apps.privasys.org")
+	_, ok = table.LookupUpstream("unknown.apps.privasys.org")
 	if ok {
 		t.Fatal("expected no route for unknown app")
 	}
