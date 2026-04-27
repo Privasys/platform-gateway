@@ -76,6 +76,14 @@ func (t *Table) Update(routes []Route, version string) bool {
 
 	m := make(map[string]Route, len(routes))
 	for _, r := range routes {
+		// Tie-break: if the same SNI appears multiple times (e.g. mgmt-service
+		// returns both a legacy apps row and an app_deployments row),
+		// prefer terminate over splice so the gateway serves the public
+		// LE wildcard cert rather than splicing through to the enclave's
+		// self-signed RA-TLS cert.
+		if existing, ok := m[r.SNI]; ok && existing.Mode == "terminate" && r.Mode != "terminate" {
+			continue
+		}
 		m[r.SNI] = r
 	}
 
