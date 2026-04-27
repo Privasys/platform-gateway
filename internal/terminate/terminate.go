@@ -249,6 +249,12 @@ func (h *Handler) proxyFor(route routetable.Route) (*httputil.ReverseProxy, erro
 			InsecureSkipVerify:    true,
 			VerifyPeerCertificate: makeRATLSVerifier(h.caCertPool, h.insecureSkip, policy, route.SNI),
 			MinVersion:            tls.VersionTLS12,
+			// ServerName drives the ClientHello SNI. The upstream is
+			// usually an IP address, in which case Go would otherwise
+			// default to the IP literal as SNI — many enclave TLS
+			// servers reject that with "tls: internal error" because
+			// their cert is bound to the public hostname.
+			ServerName: route.SNI,
 		},
 		MaxIdleConnsPerHost: 8,
 		IdleConnTimeout:     h.idleTimeout,
