@@ -72,6 +72,7 @@ type Handler struct {
 	idleTimeout  time.Duration
 	caCertPool   *x509.CertPool
 	insecureSkip bool
+	corsOrigins  map[string]struct{}
 
 	// One reverse proxy per upstream so connections are pooled. The
 	// transport is reset whenever the route's policy changes.
@@ -92,6 +93,7 @@ type Options struct {
 	IdleTimeout  time.Duration
 	CACertPool   *x509.CertPool // pool used to validate upstream RA-TLS certs (the enclave's intermediary CA chain)
 	InsecureSkip bool           // dev/test only: skip RA-TLS chain validation, only enforce expected-OID policy
+	CORSOrigins  []string       // allowed CORS origins; empty disables CORS injection (enclave is expected to handle it)
 }
 
 // New creates a Handler. tlsConfig must be set up by the caller (typically
@@ -103,12 +105,20 @@ func New(opts Options) *Handler {
 	if opts.IdleTimeout == 0 {
 		opts.IdleTimeout = 300 * time.Second
 	}
+	origins := make(map[string]struct{}, len(opts.CORSOrigins))
+	for _, o := range opts.CORSOrigins {
+		o = strings.TrimSpace(o)
+		if o != "" {
+			origins[o] = struct{}{}
+		}
+	}
 	return &Handler{
 		tlsConfig:    opts.TLSConfig,
 		dialTimeout:  opts.DialTimeout,
 		idleTimeout:  opts.IdleTimeout,
 		caCertPool:   opts.CACertPool,
 		insecureSkip: opts.InsecureSkip,
+		corsOrigins:  origins,
 		proxies:      make(map[string]*upstreamProxy),
 	}
 }
@@ -157,6 +167,16 @@ func (h *Handler) serveHTTP(tlsConn *tls.Conn, route routetable.Route, rp *httpu
 		}
 		tlsConn.SetReadDeadline(time.Time{})
 
+		// CORS preflight short-circuit. Browsers issue OPTIONS with
+		// Origin + Access-Control-Request-* headers before any
+		// non-simple cross-origin request; the enclave never sees them
+		// (gateway terminates), and most enclave servers don't speak
+		// CORS anyway. We answer here when the origin is allowed.
+		if req.Method == http.MethodOptions && h.isAllowedOrigin(req.Header.Get("Origin")) {
+			writeCORSPreflight(tlsConn, req)
+			continue
+		}
+
 		// Set the host header so the upstream sees the public hostname.
 		req.URL.Host = route.Upstream
 		req.URL.Scheme = "https"
@@ -167,6 +187,15 @@ func (h *Handler) serveHTTP(tlsConn *tls.Conn, route routetable.Route, rp *httpu
 
 		// We want to write the response back over the same TLS conn.
 		w := newConnResponseWriter(tlsConn)
+		// Inject CORS response headers for allowed origins so the
+		// browser accepts the cross-origin response. The proxy strips
+		// hop-by-hop headers; CORS headers are end-to-end and safe to
+		// add at this layer.
+		if origin := req.Header.Get("Origin"); origin != "" && h.isAllowedOrigin(origin) {
+			w.Header().Set("Access-Control-Allow-Origin", origin)
+			w.Header().Set("Vary", "Origin")
+			w.Header().Set("Access-Control-Allow-Credentials", "true")
+		}
 		rp.ServeHTTP(w, req)
 		w.flushClose(req)
 
@@ -363,4 +392,40 @@ func writeStatus(w io.Writer, code int, msg string) {
 	body := fmt.Sprintf("%d %s\n", code, msg)
 	fmt.Fprintf(w, "HTTP/1.1 %d %s\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s",
 		code, http.StatusText(code), len(body), body)
+}
+
+// isAllowedOrigin reports whether origin is in the gateway's allow-list.
+func (h *Handler) isAllowedOrigin(origin string) bool {
+	if origin == "" || len(h.corsOrigins) == 0 {
+		return false
+	}
+	_, ok := h.corsOrigins[origin]
+	return ok
+}
+
+// writeCORSPreflight writes a 204 response with the standard CORS
+// preflight headers, echoing back the Access-Control-Request-* values
+// the browser sent. Caller has already checked the origin is allowed.
+func writeCORSPreflight(w io.Writer, req *http.Request) {
+	origin := req.Header.Get("Origin")
+	method := req.Header.Get("Access-Control-Request-Method")
+	if method == "" {
+		method = "GET, POST, PUT, DELETE, OPTIONS"
+	}
+	headers := req.Header.Get("Access-Control-Request-Headers")
+	if headers == "" {
+		headers = "Authorization, Content-Type, Accept"
+	}
+	fmt.Fprintf(w,
+		"HTTP/1.1 204 No Content\r\n"+
+			"Access-Control-Allow-Origin: %s\r\n"+
+			"Access-Control-Allow-Methods: %s\r\n"+
+			"Access-Control-Allow-Headers: %s\r\n"+
+			"Access-Control-Allow-Credentials: true\r\n"+
+			"Access-Control-Max-Age: 600\r\n"+
+			"Vary: Origin\r\n"+
+			"Content-Length: 0\r\n"+
+			"\r\n",
+		origin, method, headers,
+	)
 }

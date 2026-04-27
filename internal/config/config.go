@@ -26,6 +26,7 @@ type Config struct {
 	TLSCertPath string // path to wildcard cert PEM (e.g. /etc/privasys/tls/wildcard.crt)
 	TLSKeyPath  string // path to wildcard cert key PEM
 	UpstreamCA  string // optional CA bundle to validate enclave RA-TLS chains; empty enforces only OID policy
+	CORSOrigins string // comma-separated list of allowed CORS origins for terminate-mode routes; empty disables CORS
 }
 
 // Load parses configuration from CLI flags with env var fallbacks.
@@ -43,6 +44,7 @@ func Load() (*Config, error) {
 	flag.StringVar(&cfg.TLSCertPath, "tls-cert", envOr("GATEWAY_TLS_CERT", ""), "Path to public TLS wildcard certificate PEM (enables terminate mode)")
 	flag.StringVar(&cfg.TLSKeyPath, "tls-key", envOr("GATEWAY_TLS_KEY", ""), "Path to public TLS wildcard certificate key PEM")
 	flag.StringVar(&cfg.UpstreamCA, "upstream-ca", envOr("GATEWAY_UPSTREAM_CA", ""), "Optional CA bundle to validate enclave RA-TLS chains in terminate mode")
+	flag.StringVar(&cfg.CORSOrigins, "cors-origins", envOr("GATEWAY_CORS_ORIGINS", ""), "Comma-separated list of allowed CORS origins for terminate-mode routes (e.g. https://chat.privasys.org,https://chat-test.privasys.org). Empty disables CORS.")
 
 	flag.Parse()
 

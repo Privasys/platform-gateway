@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -77,8 +78,9 @@ func main() {
 			IdleTimeout:  cfg.IdleTimeout,
 			CACertPool:   caPool,
 			InsecureSkip: caPool == nil, // no CA pool ⇒ rely on OID policy only
+			CORSOrigins:  splitAndTrim(cfg.CORSOrigins),
 		})
-		log.Printf("terminate mode enabled (cert=%s key=%s upstream-ca=%q)", cfg.TLSCertPath, cfg.TLSKeyPath, cfg.UpstreamCA)
+		log.Printf("terminate mode enabled (cert=%s key=%s upstream-ca=%q cors=%q)", cfg.TLSCertPath, cfg.TLSKeyPath, cfg.UpstreamCA, cfg.CORSOrigins)
 	} else {
 		log.Printf("terminate mode disabled (no -tls-cert configured); routes requesting Mode=terminate will be dropped")
 	}
@@ -121,4 +123,20 @@ func main() {
 	}
 
 	log.Println("gateway stopped")
+}
+
+// splitAndTrim splits a comma-separated list, trimming whitespace and
+// dropping empty entries. Used for -cors-origins.
+func splitAndTrim(s string) []string {
+	if s == "" {
+		return nil
+	}
+	parts := strings.Split(s, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }
