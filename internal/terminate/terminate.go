@@ -72,7 +72,15 @@ type Handler struct {
 	idleTimeout  time.Duration
 	caCertPool   *x509.CertPool
 	insecureSkip bool
-	corsOrigins  map[string]struct{}
+	// Exact-match allow-list (e.g. https://chat.privasys.org).
+	corsOrigins map[string]struct{}
+	// Wildcard suffix allow-list. Each entry was configured as
+	// "*.privasys.org" or "https://*.privasys.org"; we store the
+	// host suffix WITHOUT the leading dot, e.g. "privasys.org". An
+	// origin matches when its host equals the suffix or ends with
+	// "." + suffix. Scheme is not constrained at the suffix level
+	// (browsers only send Origin for http/https anyway).
+	corsSuffixes []string
 
 	// One reverse proxy per upstream so connections are pooled. The
 	// transport is reset whenever the route's policy changes.
@@ -106,11 +114,17 @@ func New(opts Options) *Handler {
 		opts.IdleTimeout = 300 * time.Second
 	}
 	origins := make(map[string]struct{}, len(opts.CORSOrigins))
+	var suffixes []string
 	for _, o := range opts.CORSOrigins {
 		o = strings.TrimSpace(o)
-		if o != "" {
-			origins[o] = struct{}{}
+		if o == "" {
+			continue
 		}
+		if suf, ok := parseWildcardOrigin(o); ok {
+			suffixes = append(suffixes, suf)
+			continue
+		}
+		origins[o] = struct{}{}
 	}
 	return &Handler{
 		tlsConfig:    opts.TLSConfig,
@@ -119,6 +133,7 @@ func New(opts Options) *Handler {
 		caCertPool:   opts.CACertPool,
 		insecureSkip: opts.InsecureSkip,
 		corsOrigins:  origins,
+		corsSuffixes: suffixes,
 		proxies:      make(map[string]*upstreamProxy),
 	}
 }
@@ -402,11 +417,70 @@ func writeStatus(w io.Writer, code int, msg string) {
 
 // isAllowedOrigin reports whether origin is in the gateway's allow-list.
 func (h *Handler) isAllowedOrigin(origin string) bool {
-	if origin == "" || len(h.corsOrigins) == 0 {
+	if origin == "" {
 		return false
 	}
-	_, ok := h.corsOrigins[origin]
-	return ok
+	if _, ok := h.corsOrigins[origin]; ok {
+		return true
+	}
+	if len(h.corsSuffixes) == 0 {
+		return false
+	}
+	host := originHost(origin)
+	if host == "" {
+		return false
+	}
+	for _, suf := range h.corsSuffixes {
+		if host == suf || strings.HasSuffix(host, "."+suf) {
+			return true
+		}
+	}
+	return false
+}
+
+// parseWildcardOrigin recognises wildcard CORS entries of the form
+// "*.example.com" or "https://*.example.com" and returns the bare
+// host suffix (without the leading dot or scheme). Returns ok=false
+// for plain origins so the caller falls back to exact match.
+func parseWildcardOrigin(spec string) (string, bool) {
+	s := strings.TrimSpace(spec)
+	// Strip optional scheme://
+	if i := strings.Index(s, "://"); i >= 0 {
+		s = s[i+3:]
+	}
+	// Strip optional :port (we only want the host suffix).
+	if i := strings.Index(s, ":"); i >= 0 {
+		s = s[:i]
+	}
+	// Strip optional trailing path (origin headers should not have
+	// one but be defensive).
+	if i := strings.Index(s, "/"); i >= 0 {
+		s = s[:i]
+	}
+	if !strings.HasPrefix(s, "*.") {
+		return "", false
+	}
+	suf := strings.ToLower(strings.TrimPrefix(s, "*."))
+	if suf == "" {
+		return "", false
+	}
+	return suf, true
+}
+
+// originHost extracts the host (no scheme, no port) from an Origin
+// header value, lower-cased. Returns "" if the value is malformed.
+func originHost(origin string) string {
+	s := origin
+	if i := strings.Index(s, "://"); i >= 0 {
+		s = s[i+3:]
+	}
+	if i := strings.Index(s, "/"); i >= 0 {
+		s = s[:i]
+	}
+	if i := strings.Index(s, ":"); i >= 0 {
+		s = s[:i]
+	}
+	return strings.ToLower(s)
 }
 
 // writeCORSPreflight writes a 204 response with the standard CORS
