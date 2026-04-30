@@ -12,13 +12,10 @@ import (
 
 // Route maps an SNI hostname to an upstream backend.
 //
-// Mode controls how the gateway handles inbound TLS for this SNI:
-//   - "" or "splice" (default): pure L4 SNI splice; the enclave terminates
-//     RA-TLS itself, the gateway never touches plaintext.
-//   - "terminate": the gateway terminates TLS with a public LE wildcard
-//     certificate, opens an internal RA-TLS connection to Upstream
-//     (verified per AttestationPolicy), and forwards HTTP. Used to let
-//     browsers reach enclave apps via the session-relay flow.
+// The gateway picks splice vs. terminate transport per-connection based on
+// the client's TLS ALPN list (clients that advertise `privasys-ratls/1`
+// get spliced; everything else is terminated when a public LE wildcard
+// cert is loaded). There is no per-app transport hint here.
 //
 // AttestationPolicy is an opaque JSON document with the expected RA-TLS
 // OID values to enforce on the internal leg in terminate mode. Shape:
@@ -27,7 +24,6 @@ import (
 type Route struct {
 	SNI               string          `json:"sni"`
 	Upstream          string          `json:"upstream"`
-	Mode              string          `json:"mode,omitempty"`
 	AttestationPolicy json.RawMessage `json:"attestation_policy,omitempty"`
 }
 
@@ -76,14 +72,9 @@ func (t *Table) Update(routes []Route, version string) bool {
 
 	m := make(map[string]Route, len(routes))
 	for _, r := range routes {
-		// Tie-break: if the same SNI appears multiple times (e.g. mgmt-service
-		// returns both a legacy apps row and an app_deployments row),
-		// prefer terminate over splice so the gateway serves the public
-		// LE wildcard cert rather than splicing through to the enclave's
-		// self-signed RA-TLS cert.
-		if existing, ok := m[r.SNI]; ok && existing.Mode == "terminate" && r.Mode != "terminate" {
-			continue
-		}
+		// Last write wins. Duplicate SNIs (e.g. legacy apps row + an
+		// app_deployments row) are tolerated; mgmt-service is responsible
+		// for not emitting conflicting upstreams.
 		m[r.SNI] = r
 	}
 
@@ -131,7 +122,7 @@ func ComputeVersion(routes []Route) string {
 
 	h := sha256.New()
 	for _, r := range sorted {
-		fmt.Fprintf(h, "%s\x00%s\x00%s\x00%s\n", r.SNI, r.Upstream, r.Mode, string(r.AttestationPolicy))
+		fmt.Fprintf(h, "%s\x00%s\x00%s\n", r.SNI, r.Upstream, string(r.AttestationPolicy))
 	}
 	return fmt.Sprintf("sha256:%x", h.Sum(nil))
 }

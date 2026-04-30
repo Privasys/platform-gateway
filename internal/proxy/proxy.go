@@ -44,16 +44,23 @@ var (
 
 // Gateway is an L4/L7 TCP proxy that routes based on TLS ClientHello SNI.
 //
-// For routes with Mode == "" or "splice" it operates as a pure L4 splicer:
-// the TLS handshake completes at the upstream enclave (which presents an
-// RA-TLS leaf cert) and the gateway never sees plaintext.
+// Per inbound connection, after the SNI/ALPN have been peeked from the
+// ClientHello, the gateway picks a transport:
 //
-// For routes with Mode == "terminate" it terminates inbound TLS using a
-// public Let's Encrypt wildcard certificate, opens an internal RA-TLS
-// connection to the upstream (verifying the enclave's quote per the
-// per-route attestation policy), and reverse-proxies HTTP. This mode lets
-// browsers (which cannot verify RA-TLS) reach enclave apps after a wallet
-// has independently attested the enclave on their behalf.
+//   - splice (default): pure L4 SNI splice. The TLS handshake completes at
+//     the upstream enclave (which presents an RA-TLS leaf cert) and the
+//     gateway never sees plaintext. RA-TLS-aware clients opt into splice
+//     by advertising the `privasys-ratls/1` ALPN protocol.
+//
+//   - terminate: when no `privasys-ratls/1` ALPN is offered AND a
+//     terminator (LE wildcard cert) is configured, the gateway terminates
+//     inbound TLS, opens an internal RA-TLS connection to the upstream
+//     (verifying the enclave's quote per the per-route attestation
+//     policy), and reverse-proxies HTTP. This lets browsers (which cannot
+//     verify RA-TLS) reach enclave apps via the session-relay flow.
+//
+// If the terminator is not configured the gateway falls back to splice for
+// every connection.
 type Gateway struct {
 	table       *routetable.Table
 	listenAddr  string
@@ -70,8 +77,7 @@ type Gateway struct {
 
 // Terminator handles the terminate-mode path for a single inbound
 // connection. Implementations are in the terminate package; pass nil to New
-// to disable terminate mode (the gateway will fall back to splice for any
-// route that requests "terminate" and log a warning).
+// to disable terminate mode (the gateway will splice every connection).
 type Terminator interface {
 	Handle(clientConn net.Conn, clientHello []byte, route routetable.Route)
 }
@@ -204,7 +210,7 @@ func (g *Gateway) handleConn(clientConn net.Conn) {
 	// Clear the deadline
 	clientConn.SetReadDeadline(time.Time{})
 
-	hostname, err := sni.Parse(buf[:n])
+	hostname, alpns, err := sni.ParseClientHello(buf[:n])
 	if err != nil {
 		connErrors.WithLabelValues("sni_parse").Inc()
 		log.Printf("SNI parse error from %s: %v", clientConn.RemoteAddr(), err)
@@ -219,14 +225,15 @@ func (g *Gateway) handleConn(clientConn net.Conn) {
 		return
 	}
 
-	// Terminate mode: the gateway owns the TLS handshake (LE wildcard cert)
-	// and reverse-proxies HTTP to the enclave over an internal RA-TLS leg.
-	if route.Mode == "terminate" {
-		if g.terminator == nil {
-			connErrors.WithLabelValues("terminate_disabled").Inc()
-			log.Printf("route %q requests terminate mode but terminator is not configured; dropping", hostname)
-			return
-		}
+	// Transport selection:
+	//   - Clients that advertise the privasys-ratls/1 ALPN are RA-TLS-aware
+	//     (e.g. the wallet's NativeRaTls module) — splice them through so the
+	//     enclave terminates RA-TLS itself.
+	//   - Everything else (browsers, curl) gets terminate when configured,
+	//     so they see the LE wildcard cert and the gateway opens an internal
+	//     RA-TLS connection to the enclave on their behalf.
+	ratlsCapable := sni.HasALPN(alpns, "privasys-ratls/1")
+	if !ratlsCapable && g.terminator != nil {
 		g.terminator.Handle(clientConn, buf[:n], route)
 		return
 	}

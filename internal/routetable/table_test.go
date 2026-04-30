@@ -68,44 +68,22 @@ func TestComputeVersion(t *testing.T) {
 	}
 }
 
-// TestUpdateDeduplicatesPreferTerminate ensures that when the same SNI
-// appears in the routes slice with both terminate and splice modes (which
-// happens today when the management-service emits both an app_deployments
-// row and a legacy apps row for the same app), the terminate entry wins.
-// Otherwise the gateway would splice the connection, browsers would see
-// the enclave's self-signed RA-TLS cert, and CORS preflight would never
-// be intercepted.
-func TestUpdateDeduplicatesPreferTerminate(t *testing.T) {
-cases := []struct {
-name   string
-routes []Route
-}{
-{
-name: "terminate first then splice",
-routes: []Route{
-{SNI: "app.example.com", Upstream: "10.0.0.1:443", Mode: "terminate"},
-{SNI: "app.example.com", Upstream: "10.0.0.1:443", Mode: "splice"},
-},
-},
-{
-name: "splice first then terminate",
-routes: []Route{
-{SNI: "app.example.com", Upstream: "10.0.0.1:443", Mode: "splice"},
-{SNI: "app.example.com", Upstream: "10.0.0.1:443", Mode: "terminate"},
-},
-},
-}
-for _, tc := range cases {
-t.Run(tc.name, func(t *testing.T) {
-table := New()
-table.Update(tc.routes, "v1")
-r, ok := table.Lookup("app.example.com")
-if !ok {
-t.Fatal("expected route for app.example.com")
-}
-if r.Mode != "terminate" {
-t.Errorf("mode = %q, want terminate", r.Mode)
-}
-})
+// TestUpdateLastWriteWins covers the duplicate-SNI tolerance case: when the
+// management-service emits the same SNI twice (legacy apps row + an
+// app_deployments row), the second entry overwrites the first. Both rows
+// must point at the same upstream for this to be safe; mgmt-service is
+// responsible for not emitting conflicting upstreams.
+func TestUpdateLastWriteWins(t *testing.T) {
+	table := New()
+	table.Update([]Route{
+		{SNI: "app.example.com", Upstream: "10.0.0.1:443"},
+		{SNI: "app.example.com", Upstream: "10.0.0.1:443"},
+	}, "v1")
+	r, ok := table.Lookup("app.example.com")
+	if !ok {
+		t.Fatal("expected route for app.example.com")
+	}
+	if r.Upstream != "10.0.0.1:443" {
+		t.Errorf("upstream = %q, want 10.0.0.1:443", r.Upstream)
 }
 }

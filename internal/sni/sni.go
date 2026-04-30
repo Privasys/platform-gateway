@@ -19,75 +19,79 @@ var (
 // The input must contain at least the complete ClientHello record.
 // Returns the SNI hostname or an error.
 func Parse(buf []byte) (string, error) {
+	host, _, err := ParseClientHello(buf)
+	return host, err
+}
+
+// ParseClientHello extracts the SNI hostname AND the ALPN protocol list
+// from a raw TLS ClientHello. ALPN is returned as a possibly-empty slice;
+// missing-ALPN-extension is not an error. The hostname behaves the same as
+// in Parse — missing SNI returns ErrNoSNI.
+func ParseClientHello(buf []byte) (hostname string, alpns []string, err error) {
 	// TLS record header: type(1) + version(2) + length(2)
 	if len(buf) < 5 {
-		return "", ErrTruncated
+		return "", nil, ErrTruncated
 	}
 	if buf[0] != 0x16 { // Handshake
-		return "", ErrNotTLS
+		return "", nil, ErrNotTLS
 	}
 	recordLen := int(buf[3])<<8 | int(buf[4])
 	if len(buf) < 5+recordLen {
-		return "", ErrTruncated
+		return "", nil, ErrTruncated
 	}
 
 	data := buf[5 : 5+recordLen]
 
 	// Handshake header: type(1) + length(3)
 	if len(data) < 4 {
-		return "", ErrTruncated
+		return "", nil, ErrTruncated
 	}
 	if data[0] != 0x01 { // ClientHello
-		return "", ErrNotClientHello
+		return "", nil, ErrNotClientHello
 	}
 	hsLen := int(data[1])<<16 | int(data[2])<<8 | int(data[3])
 	if len(data) < 4+hsLen {
-		return "", ErrTruncated
+		return "", nil, ErrTruncated
 	}
 	data = data[4 : 4+hsLen]
 
-	// ClientHello body:
-	//   version(2) + random(32) + session_id_len(1) + session_id(var)
-	//   + cipher_suites_len(2) + cipher_suites(var)
-	//   + compression_methods_len(1) + compression_methods(var)
-	//   + extensions_len(2) + extensions(var)
+	// ClientHello body: version(2) + random(32) + session_id_len(1) + session_id(var)
+	//                 + cipher_suites_len(2) + cipher_suites(var)
+	//                 + compression_methods_len(1) + compression_methods(var)
+	//                 + extensions_len(2) + extensions(var)
 	if len(data) < 34 {
-		return "", ErrTruncated
+		return "", nil, ErrTruncated
 	}
-	pos := 34 // skip version + random
+	pos := 34
 
-	// Session ID
 	if pos >= len(data) {
-		return "", ErrTruncated
+		return "", nil, ErrTruncated
 	}
 	sidLen := int(data[pos])
 	pos++
 	pos += sidLen
 
-	// Cipher suites
 	if pos+2 > len(data) {
-		return "", ErrTruncated
+		return "", nil, ErrTruncated
 	}
 	csLen := int(data[pos])<<8 | int(data[pos+1])
 	pos += 2 + csLen
 
-	// Compression methods
 	if pos >= len(data) {
-		return "", ErrTruncated
+		return "", nil, ErrTruncated
 	}
 	cmLen := int(data[pos])
 	pos += 1 + cmLen
 
-	// Extensions
 	if pos+2 > len(data) {
-		return "", ErrNoSNI
+		return "", nil, ErrNoSNI
 	}
 	extLen := int(data[pos])<<8 | int(data[pos+1])
 	pos += 2
 
 	end := pos + extLen
 	if end > len(data) {
-		return "", ErrTruncated
+		return "", nil, ErrTruncated
 	}
 
 	for pos+4 <= end {
@@ -96,17 +100,65 @@ func Parse(buf []byte) (string, error) {
 		pos += 4
 
 		if pos+extDataLen > end {
-			return "", ErrTruncated
+			return "", nil, ErrTruncated
 		}
 
-		if extType == 0x0000 { // server_name
-			return parseSNIExtension(data[pos : pos+extDataLen])
+		switch extType {
+		case 0x0000: // server_name
+			if h, perr := parseSNIExtension(data[pos : pos+extDataLen]); perr == nil {
+				hostname = h
+			}
+		case 0x0010: // application_layer_protocol_negotiation (RFC 7301)
+			alpns = parseALPNExtension(data[pos : pos+extDataLen])
 		}
-
 		pos += extDataLen
 	}
 
-	return "", ErrNoSNI
+	if hostname == "" {
+		return "", alpns, ErrNoSNI
+	}
+	return hostname, alpns, nil
+}
+
+// parseALPNExtension decodes an ALPN extension body (RFC 7301):
+//
+//	protocol_name_list_len(2) + [name_len(1) + name(var)]*
+//
+// Returns nil on any parse error (ALPN is best-effort for routing).
+func parseALPNExtension(data []byte) []string {
+	if len(data) < 2 {
+		return nil
+	}
+	listLen := int(data[0])<<8 | int(data[1])
+	if 2+listLen > len(data) {
+		return nil
+	}
+	pos := 2
+	end := 2 + listLen
+	var out []string
+	for pos < end {
+		if pos+1 > end {
+			return out
+		}
+		nLen := int(data[pos])
+		pos++
+		if pos+nLen > end {
+			return out
+		}
+		out = append(out, string(data[pos:pos+nLen]))
+		pos += nLen
+	}
+	return out
+}
+
+// HasALPN reports whether proto appears in the parsed ALPN list.
+func HasALPN(alpns []string, proto string) bool {
+	for _, p := range alpns {
+		if p == proto {
+			return true
+		}
+	}
+	return false
 }
 
 // parseSNIExtension parses the SNI extension data.

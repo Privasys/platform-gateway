@@ -82,7 +82,7 @@ func main() {
 		})
 		log.Printf("terminate mode enabled (cert=%s key=%s upstream-ca=%q cors=%q)", cfg.TLSCertPath, cfg.TLSKeyPath, cfg.UpstreamCA, cfg.CORSOrigins)
 	} else {
-		log.Printf("terminate mode disabled (no -tls-cert configured); routes requesting Mode=terminate will be dropped")
+		log.Printf("terminate mode disabled (no -tls-cert configured); every connection will be spliced")
 	}
 
 	// L4 gateway

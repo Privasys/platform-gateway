@@ -20,8 +20,9 @@ type Config struct {
 	BufferSize    int           // Read buffer size in bytes
 
 	// Terminate-mode (session-relay) options. When TLSCertPath is set,
-	// the gateway will terminate inbound TLS for routes flagged with
-	// Mode == "terminate" using the loaded wildcard cert (LE-issued).
+	// the gateway will terminate inbound TLS for any connection that
+	// does NOT advertise the `privasys-ratls/1` ALPN, using the loaded
+	// wildcard cert (LE-issued). RA-TLS-aware clients always splice.
 	// Empty = terminate mode disabled (gateway is splice-only).
 	TLSCertPath string // path to wildcard cert PEM (e.g. /etc/privasys/tls/wildcard.crt)
 	TLSKeyPath  string // path to wildcard cert key PEM
