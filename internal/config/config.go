@@ -39,7 +39,7 @@ func Load() (*Config, error) {
 	flag.StringVar(&cfg.ManagementURL, "management-url", envOr("GATEWAY_MANAGEMENT_URL", ""), "Management service URL")
 	flag.StringVar(&cfg.AuthToken, "auth-token", envOr("GATEWAY_AUTH_TOKEN", ""), "Bearer token for management service")
 	pollSec := flag.Int("poll-interval", envOrInt("GATEWAY_POLL_INTERVAL", 5), "Route sync poll interval in seconds")
-	dialSec := flag.Int("dial-timeout", envOrInt("GATEWAY_DIAL_TIMEOUT", 5), "Upstream dial timeout in seconds")
+	dialSec := flag.Int("dial-timeout", envOrInt("GATEWAY_DIAL_TIMEOUT", 2), "Upstream dial timeout in seconds")
 	idleSec := flag.Int("idle-timeout", envOrInt("GATEWAY_IDLE_TIMEOUT", 300), "Idle connection timeout in seconds")
 	flag.IntVar(&cfg.BufferSize, "buffer-size", envOrInt("GATEWAY_BUFFER_SIZE", 32768), "Read buffer size in bytes")
 	flag.StringVar(&cfg.TLSCertPath, "tls-cert", envOr("GATEWAY_TLS_CERT", ""), "Path to public TLS wildcard certificate PEM (enables terminate mode)")

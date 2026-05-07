@@ -108,7 +108,16 @@ type Options struct {
 // from a certloader.Loader's TLSConfig()).
 func New(opts Options) *Handler {
 	if opts.DialTimeout == 0 {
-		opts.DialTimeout = 5 * time.Second
+		// Keep this short. The dev/demo enclaves run on Spot VMs that
+		// are routinely stopped; when they are off the upstream IP
+		// drops SYNs (no RST) and we'd otherwise wait the full
+		// timeout before returning 502 to the browser — leaving the
+		// user staring at a spinner for ~7 s on every prompt. A 2 s
+		// cap is plenty for any healthy enclave we'd accept traffic
+		// for: the upstream lives in the same region, and the
+		// per-route reverse proxy keeps idle connections pooled so
+		// the dial only happens on the very first request.
+		opts.DialTimeout = 2 * time.Second
 	}
 	if opts.IdleTimeout == 0 {
 		opts.IdleTimeout = 300 * time.Second

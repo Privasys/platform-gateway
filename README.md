@@ -34,7 +34,7 @@ The gateway periodically polls the management service `GET /api/v1/internal/rout
 | `-management-url` | `GATEWAY_MANAGEMENT_URL` | — | Management service base URL (required) |
 | `-auth-token` | `GATEWAY_AUTH_TOKEN` | — | Bearer token for route sync |
 | `-poll-interval` | `GATEWAY_POLL_INTERVAL` | `5s` | Route sync polling interval |
-| `-dial-timeout` | `GATEWAY_DIAL_TIMEOUT` | `5s` | Timeout for connecting to upstream |
+| `-dial-timeout` | `GATEWAY_DIAL_TIMEOUT` | `2s` | Timeout for connecting to upstream |
 | `-idle-timeout` | `GATEWAY_IDLE_TIMEOUT` | `300s` | Close connections idle longer than this |
 | `-buffer-size` | `GATEWAY_BUFFER_SIZE` | `32768` | TCP splice buffer size in bytes |
 
