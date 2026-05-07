@@ -286,6 +286,49 @@ func (h *Handler) proxyFor(route routetable.Route) (*httputil.ReverseProxy, erro
 		w.WriteHeader(http.StatusBadGateway)
 		_, _ = w.Write([]byte("502 Bad Gateway: upstream enclave unreachable\n"))
 	}
+	// CORS is owned at this gateway layer (see serveHTTP — we already
+	// set Access-Control-Allow-* headers on the response writer for
+	// allowed origins, and answer OPTIONS preflights ourselves). Some
+	// upstream services (eg. confidential-ai) ship their own CORS
+	// middleware so they remain usable in direct-access dev/test
+	// scenarios; when proxied through here their headers would stack
+	// on top of ours and the browser would reject the response with
+	// "Multiple CORS header 'Access-Control-Allow-Origin' not
+	// allowed". Strip the upstream copies so only the gateway's
+	// values survive.
+	rp.ModifyResponse = func(resp *http.Response) error {
+		for _, h := range []string{
+			"Access-Control-Allow-Origin",
+			"Access-Control-Allow-Credentials",
+			"Access-Control-Allow-Methods",
+			"Access-Control-Allow-Headers",
+			"Access-Control-Expose-Headers",
+			"Access-Control-Max-Age",
+		} {
+			resp.Header.Del(h)
+		}
+		// Vary may legitimately include non-Origin tokens from the
+		// upstream (Accept-Encoding etc). Strip just the Origin
+		// token so the gateway's own "Vary: Origin" header is the
+		// only mention of it.
+		if vs := resp.Header.Values("Vary"); len(vs) > 0 {
+			resp.Header.Del("Vary")
+			for _, line := range vs {
+				kept := make([]string, 0, 2)
+				for _, tok := range strings.Split(line, ",") {
+					t := strings.TrimSpace(tok)
+					if t == "" || strings.EqualFold(t, "Origin") {
+						continue
+					}
+					kept = append(kept, t)
+				}
+				if len(kept) > 0 {
+					resp.Header.Add("Vary", strings.Join(kept, ", "))
+				}
+			}
+		}
+		return nil
+	}
 	// Strip hop-by-hop headers and inject session-relay-friendly defaults.
 	originalDirector := rp.Director
 	rp.Director = func(req *http.Request) {
