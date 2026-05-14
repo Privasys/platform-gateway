@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+	"strings"
 	"sync/atomic"
 )
 
@@ -46,9 +47,13 @@ func New() *Table {
 
 // Lookup returns the route for the given SNI hostname.
 // Returns (Route{}, false) if no route exists.
+//
+// SNI hostnames are ASCII case-insensitive per RFC 6066, and TLS clients
+// (rustls, Go crypto/tls, browsers) typically lowercase the SNI before
+// sending it. The lookup key is canonicalized to lowercase to match.
 func (t *Table) Lookup(sni string) (Route, bool) {
 	m := t.routes.Load()
-	r, ok := (*m)[sni]
+	r, ok := (*m)[strings.ToLower(sni)]
 	return r, ok
 }
 
@@ -75,7 +80,10 @@ func (t *Table) Update(routes []Route, version string) bool {
 		// Last write wins. Duplicate SNIs (e.g. legacy apps row + an
 		// app_deployments row) are tolerated; mgmt-service is responsible
 		// for not emitting conflicting upstreams.
-		m[r.SNI] = r
+		//
+		// SNI is ASCII case-insensitive (RFC 6066); store keys lowercase
+		// so Lookup matches what TLS clients actually transmit.
+		m[strings.ToLower(r.SNI)] = r
 	}
 
 	t.routes.Store(&m)

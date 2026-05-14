@@ -85,5 +85,32 @@ func TestUpdateLastWriteWins(t *testing.T) {
 	}
 	if r.Upstream != "10.0.0.1:443" {
 		t.Errorf("upstream = %q, want 10.0.0.1:443", r.Upstream)
+	}
 }
+
+// TestLookupCaseInsensitive ensures SNI lookup is ASCII case-insensitive
+// (RFC 6066). Routes registered with mixed-case SNI (e.g. mgmt-service
+// emits "DEV---eu-paris-1-mgr.apps-test.privasys.org" with uppercase env
+// name) must be reachable when the TLS client lowercases the SNI before
+// sending it (rustls, Go crypto/tls, browsers all do this).
+func TestLookupCaseInsensitive(t *testing.T) {
+	table := New()
+	table.Update([]Route{
+		{SNI: "DEV---eu-paris-1-mgr.apps-test.privasys.org", Upstream: "141.94.219.130:8446"},
+	}, "v1")
+
+	for _, q := range []string{
+		"DEV---eu-paris-1-mgr.apps-test.privasys.org",
+		"dev---eu-paris-1-mgr.apps-test.privasys.org",
+		"Dev---Eu-Paris-1-Mgr.Apps-Test.Privasys.Org",
+	} {
+		r, ok := table.Lookup(q)
+		if !ok {
+			t.Errorf("Lookup(%q): no route", q)
+			continue
+		}
+		if r.Upstream != "141.94.219.130:8446" {
+			t.Errorf("Lookup(%q): upstream = %q", q, r.Upstream)
+		}
+	}
 }
