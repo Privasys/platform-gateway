@@ -231,10 +231,22 @@ func (h *Handler) serveHTTP(tlsConn *tls.Conn, route routetable.Route, rp *httpu
 }
 
 // proxyFor returns the cached reverse proxy for this upstream, or builds
-// one on first use / when the policy changes.
+// one on first use / when the policy or SNI changes.
+//
+// The SNI is part of the cache key because it gets baked into both the
+// Director closure (req.Host rewrite for vhost routing) and the TLS
+// client config ServerName. If two routes share the same upstream
+// IP:port but differ in SNI (e.g. an app is re-deployed under a new
+// hostname while reusing the same enclave VM), reusing a cached proxy
+// keyed only on upstream would silently rewrite Host to the *old* SNI
+// and the upstream would 404. See bug observed 2026-05-21 where
+// `confidential-ai-demo` was deleted and re-deployed as
+// `confidential-ai` on the same enclave; the gateway kept rewriting
+// Host to `confidential-ai-demo.apps-test.privasys.org` for several
+// minutes after the route table updated.
 func (h *Handler) proxyFor(route routetable.Route) (*httputil.ReverseProxy, error) {
 	policyHash := hashPolicy(route.AttestationPolicy)
-	key := route.Upstream + "|" + policyHash
+	key := route.Upstream + "|" + route.SNI + "|" + policyHash
 
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -242,7 +254,8 @@ func (h *Handler) proxyFor(route routetable.Route) (*httputil.ReverseProxy, erro
 	if existing, ok := h.proxies[key]; ok {
 		return existing.rp, nil
 	}
-	// Drop any stale entry for the same upstream with a different policy.
+	// Drop any stale entry for the same upstream with a different
+	// policy or SNI.
 	for k, p := range h.proxies {
 		if strings.HasPrefix(k, route.Upstream+"|") {
 			if p.cancel != nil {
