@@ -345,6 +345,15 @@ func (h *Handler) proxyFor(route routetable.Route) (*httputil.ReverseProxy, erro
 		req.Host = route.SNI // upstream may use it for vhost routing
 		req.Header.Del("X-Forwarded-Proto")
 		req.Header.Set("X-Forwarded-Proto", "https")
+		// Trusted terminate marker: tells the enclave that a party other
+		// than the client terminated TLS on this leg, so plaintext app
+		// bodies must be refused (sealed-CBOR only). Always strip any
+		// client-supplied value first — clients must not be able to
+		// unset it, and a client *setting* it only makes its own
+		// requests stricter. Splice mode is pure L4 and cannot inject
+		// headers, which is exactly what makes absence trustworthy.
+		req.Header.Del("X-Privasys-Edge")
+		req.Header.Set("X-Privasys-Edge", "terminate")
 	}
 
 	h.proxies[key] = &upstreamProxy{policyHash: policyHash, rp: rp}
