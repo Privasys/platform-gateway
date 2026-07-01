@@ -219,6 +219,14 @@ func (h *Handler) serveHTTP(tlsConn *tls.Conn, route routetable.Route, rp *httpu
 			w.Header().Set("Access-Control-Allow-Origin", origin)
 			w.Header().Set("Vary", "Origin")
 			w.Header().Set("Access-Control-Allow-Credentials", "true")
+			// Expose the enclave's session-relay diagnostics headers to
+			// the browser SDK: without this, cross-origin JS cannot read
+			// any X-Privasys-* response header (the SDK primarily
+			// branches on response-body fields, but the inner status of
+			// sealed streams and the EncAuth reject reason are also
+			// carried here).
+			w.Header().Set("Access-Control-Expose-Headers",
+				"X-Privasys-Reason, X-Privasys-EncAuth-Reject, X-Privasys-Inner-Status, X-Privasys-Edge")
 		}
 		rp.ServeHTTP(w, req)
 		w.flushClose(req)
