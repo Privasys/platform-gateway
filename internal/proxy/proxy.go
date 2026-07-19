@@ -9,6 +9,7 @@ import (
 	"crypto/rand"
 	"crypto/tls"
 	"crypto/x509"
+	"errors"
 	"fmt"
 	"log"
 	"math/big"
@@ -195,27 +196,40 @@ func (g *Gateway) handleConn(clientConn net.Conn) {
 	connActive.Inc()
 	defer connActive.Dec()
 
-	// Read enough of the ClientHello to extract SNI.
-	// TLS records can be up to 16KB, but the ClientHello is almost always
-	// in the first ~500 bytes. We read into a buffer and parse from there.
+	// Read the ClientHello to extract SNI. TLS records can be up to 16KB,
+	// and a large ClientHello (post-quantum key shares in Go 1.24+/Chrome
+	// make ~1.7KB hellos routine) arrives split across TCP segments, so a
+	// single Read often returns a truncated record. Keep reading until the
+	// hello parses, the buffer fills, or the deadline expires.
 	buf := make([]byte, g.bufferSize)
 
-	// Set a deadline for the initial read (5 seconds to send ClientHello)
+	// Deadline covers the whole ClientHello (5 seconds to send it)
 	clientConn.SetReadDeadline(time.Now().Add(5 * time.Second))
-	n, err := clientConn.Read(buf)
-	if err != nil {
-		connErrors.WithLabelValues("client_read").Inc()
-		return
-	}
-	// Clear the deadline
-	clientConn.SetReadDeadline(time.Time{})
-
-	hostname, alpns, err := sni.ParseClientHello(buf[:n])
-	if err != nil {
+	var (
+		n        int
+		hostname string
+		alpns    []string
+	)
+	for {
+		m, err := clientConn.Read(buf[n:])
+		if err != nil {
+			connErrors.WithLabelValues("client_read").Inc()
+			return
+		}
+		n += m
+		hostname, alpns, err = sni.ParseClientHello(buf[:n])
+		if err == nil {
+			break
+		}
+		if errors.Is(err, sni.ErrTruncated) && n < len(buf) {
+			continue
+		}
 		connErrors.WithLabelValues("sni_parse").Inc()
 		log.Printf("SNI parse error from %s: %v", clientConn.RemoteAddr(), err)
 		return
 	}
+	// Clear the deadline
+	clientConn.SetReadDeadline(time.Time{})
 
 	route, ok := g.table.Lookup(hostname)
 	if !ok {
