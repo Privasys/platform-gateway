@@ -31,14 +31,14 @@ func TestParseWildcardOrigin(t *testing.T) {
 func TestIsAllowedOrigin(t *testing.T) {
 	h := New(Options{
 		CORSOrigins: []string{
-			"https://chat-test.privasys.org",
+			"https://chat.test.privasys.org",
 			"*.privasys.org",
 			"*.privasys.id",
 		},
 	})
 
 	allowed := []string{
-		"https://chat-test.privasys.org",
+		"https://chat.test.privasys.org",
 		"https://chat.privasys.org",
 		"https://app.privasys.org",
 		"http://privasys.org",
