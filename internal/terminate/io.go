@@ -70,6 +70,12 @@ func newConnResponseWriter(c net.Conn, br *bufio.Reader) *connResponseWriter {
 // conn — the proxy owns it. Clears the request deadline the loop set.
 func (w *connResponseWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
 	w.hijacked = true
+	// Flush anything already written through this writer (the WebSocket
+	// accept path writes its 101 via WriteHeader immediately before
+	// hijacking and relies on the server to put it on the wire).
+	if err := w.bw.Flush(); err != nil {
+		return nil, nil, err
+	}
 	w.conn.SetReadDeadline(time.Time{})
 	w.conn.SetWriteDeadline(time.Time{})
 	return w.conn, bufio.NewReadWriter(w.br, w.bw), nil
@@ -86,7 +92,9 @@ func (w *connResponseWriter) WriteHeader(code int) {
 
 	// Decide on transfer encoding. If Content-Length is set, use it.
 	// Otherwise fall back to chunked so we can stream SSE/long bodies.
-	if w.header.Get("Content-Length") == "" && w.header.Get("Transfer-Encoding") == "" {
+	// 1xx responses (the 101 Switching Protocols written by the WebSocket
+	// accept before hijacking) carry no body and must not be framed.
+	if code >= 200 && w.header.Get("Content-Length") == "" && w.header.Get("Transfer-Encoding") == "" {
 		w.chunked = true
 		w.header.Set("Transfer-Encoding", "chunked")
 	}

@@ -86,6 +86,11 @@ type Handler struct {
 	// transport is reset whenever the route's policy changes.
 	mu      sync.Mutex
 	proxies map[string]*upstreamProxy
+
+	// Multiplexed sealed-WebSocket pools (wsmux.go), one per upstream,
+	// reset like proxies when the route's policy or SNI changes.
+	muxMu    sync.Mutex
+	muxPools map[string]*gwMuxPool
 }
 
 type upstreamProxy struct {
@@ -144,6 +149,7 @@ func New(opts Options) *Handler {
 		corsOrigins:  origins,
 		corsSuffixes: suffixes,
 		proxies:      make(map[string]*upstreamProxy),
+		muxPools:     make(map[string]*gwMuxPool),
 	}
 }
 
@@ -199,6 +205,14 @@ func (h *Handler) serveHTTP(tlsConn *tls.Conn, route routetable.Route, rp *httpu
 		if req.Method == http.MethodOptions && h.isAllowedOrigin(req.Header.Get("Origin")) {
 			writeCORSPreflight(tlsConn, req)
 			continue
+		}
+
+		// Sealed WebSocket: terminate the browser socket here and relay it
+		// as a stream over the shared enclave mux leg, so the enclave holds
+		// a few pooled connections instead of one per client.
+		if p := parseSealedWS(req); p != nil {
+			h.serveSealedWSMux(newConnResponseWriter(tlsConn, br), req, route, p)
+			return
 		}
 
 		// Set the host header so the upstream sees the public hostname.
