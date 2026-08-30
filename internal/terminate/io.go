@@ -40,6 +40,7 @@ func (c *prefixConn) Read(b []byte) (int, error) {
 // terminated the handshake by hand so we could splice the ClientHello).
 type connResponseWriter struct {
 	conn           net.Conn
+	br             *bufio.Reader
 	bw             *bufio.Writer
 	header         http.Header
 	status         int
@@ -48,15 +49,30 @@ type connResponseWriter struct {
 	chunked        bool
 	bodyBuf        []byte
 	bodyBuffered   bool
+	hijacked       bool
 }
 
-func newConnResponseWriter(c net.Conn) *connResponseWriter {
+func newConnResponseWriter(c net.Conn, br *bufio.Reader) *connResponseWriter {
 	return &connResponseWriter{
 		conn:   c,
+		br:     br,
 		bw:     bufio.NewWriter(c),
 		header: make(http.Header),
 		status: 200,
 	}
+}
+
+// Hijack lets httputil.ReverseProxy take over the connection to proxy a
+// WebSocket upgrade (a sealed session-relay WebSocket) through to the enclave.
+// It returns the raw TLS conn plus a ReadWriter over the SAME request reader
+// (so any bytes already buffered past the request headers are preserved) and
+// the response writer. After this the serveHTTP loop must stop touching the
+// conn — the proxy owns it. Clears the request deadline the loop set.
+func (w *connResponseWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	w.hijacked = true
+	w.conn.SetReadDeadline(time.Time{})
+	w.conn.SetWriteDeadline(time.Time{})
+	return w.conn, bufio.NewReadWriter(w.br, w.bw), nil
 }
 
 func (w *connResponseWriter) Header() http.Header { return w.header }

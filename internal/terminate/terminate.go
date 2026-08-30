@@ -210,7 +210,7 @@ func (h *Handler) serveHTTP(tlsConn *tls.Conn, route routetable.Route, rp *httpu
 		}
 
 		// We want to write the response back over the same TLS conn.
-		w := newConnResponseWriter(tlsConn)
+		w := newConnResponseWriter(tlsConn, br)
 		// Inject CORS response headers for allowed origins so the
 		// browser accepts the cross-origin response. The proxy strips
 		// hop-by-hop headers; CORS headers are end-to-end and safe to
@@ -229,6 +229,14 @@ func (h *Handler) serveHTTP(tlsConn *tls.Conn, route routetable.Route, rp *httpu
 				"X-Privasys-Reason, X-Privasys-EncAuth-Reject, X-Privasys-Inner-Status, X-Privasys-Edge")
 		}
 		rp.ServeHTTP(w, req)
+
+		// A WebSocket upgrade hijacks the conn: the reverse proxy now owns it
+		// (it wrote the 101 and is pumping bytes between the client and the
+		// enclave). Stop the request loop and do NOT flushClose — touching the
+		// conn now would corrupt the tunnelled WebSocket.
+		if w.hijacked {
+			return
+		}
 		w.flushClose(req)
 
 		// Honour Connection: close from either side.
