@@ -21,7 +21,7 @@ import (
 // AttestationPolicy is an opaque JSON document with the expected RA-TLS
 // OID values to enforce on the internal leg in terminate mode. Shape:
 //
-//	{ "expected_oids": { "1.3.6.1.4.1.65230.2.5": "<hex>" } }
+//	{ "expected_oids": { "1.3.6.1.4.1.65230.2.4": "<hex>" } }
 type Route struct {
 	SNI               string          `json:"sni"`
 	Upstream          string          `json:"upstream"`
