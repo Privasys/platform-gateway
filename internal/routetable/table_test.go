@@ -1,6 +1,12 @@
 package routetable
 
-import "testing"
+import (
+	"crypto/sha256"
+	"encoding/json"
+	"fmt"
+	"strings"
+	"testing"
+)
 
 func TestLookup(t *testing.T) {
 	table := New()
@@ -112,5 +118,84 @@ func TestLookupCaseInsensitive(t *testing.T) {
 		if r.Upstream != "141.94.219.130:8446" {
 			t.Errorf("Lookup(%q): upstream = %q", q, r.Upstream)
 		}
+	}
+}
+
+// TestRouteStateParsing covers the optional "state" field of the route
+// feed: absent means active, "quarantined" marks the route, and an unknown
+// value is treated as active.
+func TestRouteStateParsing(t *testing.T) {
+	var routes []Route
+	feed := `[
+		{"sni": "a.apps.privasys.org", "upstream": "10.0.0.1:443"},
+		{"sni": "b.apps.privasys.org", "upstream": "10.0.0.2:443", "state": "quarantined"},
+		{"sni": "c.apps.privasys.org", "upstream": "10.0.0.3:443", "state": "something-new"}
+	]`
+	if err := json.Unmarshal([]byte(feed), &routes); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	table := New()
+	table.Update(routes, "v1")
+
+	for sni, want := range map[string]bool{
+		"a.apps.privasys.org": false,
+		"b.apps.privasys.org": true,
+		"c.apps.privasys.org": false,
+	} {
+		r, ok := table.Lookup(sni)
+		if !ok {
+			t.Fatalf("Lookup(%q): no route", sni)
+		}
+		if r.Quarantined() != want {
+			t.Errorf("Lookup(%q).Quarantined() = %v, want %v", sni, r.Quarantined(), want)
+		}
+	}
+	if got := table.QuarantinedCount(); got != 1 {
+		t.Errorf("QuarantinedCount() = %d, want 1", got)
+	}
+
+	// An active route marshals without the field, so the shape of a
+	// feed without quarantines is unchanged.
+	out, err := json.Marshal(routes[0])
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if strings.Contains(string(out), "state") {
+		t.Errorf("active route marshals a state: %s", out)
+	}
+}
+
+// TestRouteStateRelease checks that a route whose state disappears from
+// the feed is served as active again after the next update.
+func TestRouteStateRelease(t *testing.T) {
+	table := New()
+	table.Update([]Route{{SNI: "a", Upstream: "1", State: StateQuarantined}}, "v1")
+	if r, _ := table.Lookup("a"); !r.Quarantined() {
+		t.Fatal("route should be quarantined")
+	}
+	table.Update([]Route{{SNI: "a", Upstream: "1"}}, "v2")
+	if r, _ := table.Lookup("a"); r.Quarantined() {
+		t.Fatal("route should be active after release")
+	}
+	if got := table.QuarantinedCount(); got != 0 {
+		t.Errorf("QuarantinedCount() = %d, want 0", got)
+	}
+}
+
+// TestComputeVersionState checks that the state moves the computed
+// version, and that routes without a state keep the version they had
+// before the field existed.
+func TestComputeVersionState(t *testing.T) {
+	active := []Route{{SNI: "a", Upstream: "1"}}
+	quarantined := []Route{{SNI: "a", Upstream: "1", State: StateQuarantined}}
+	if ComputeVersion(active) == ComputeVersion(quarantined) {
+		t.Error("quarantine should change the version")
+	}
+
+	h := sha256.New()
+	fmt.Fprintf(h, "%s\x00%s\x00%s\n", "a", "1", "")
+	legacy := fmt.Sprintf("sha256:%x", h.Sum(nil))
+	if got := ComputeVersion(active); got != legacy {
+		t.Errorf("version without state = %q, want legacy %q", got, legacy)
 	}
 }

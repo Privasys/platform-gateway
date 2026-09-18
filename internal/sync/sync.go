@@ -9,6 +9,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/Privasys/platform-gateway/internal/routetable"
@@ -120,12 +121,34 @@ func (s *Syncer) fetchOnce(ctx context.Context) {
 		result.Version = routetable.ComputeVersion(result.Routes)
 	}
 
+	previous := s.table.Snapshot()
 	changed := s.table.Update(result.Routes, result.Version)
 	s.lastSync = time.Now()
 	s.lastErr = nil
 
 	if changed {
-		log.Printf("routes updated: %d routes, version=%s", len(result.Routes), result.Version)
+		log.Printf("routes updated: %d routes (%d quarantined), version=%s",
+			len(result.Routes), s.table.QuarantinedCount(), result.Version)
+		logStateChanges(previous, s.table.Snapshot())
+	}
+}
+
+// logStateChanges logs every host that entered or left quarantine between
+// two snapshots of the table. A host that disappears is not logged here:
+// it no longer has a route at all.
+func logStateChanges(before, after []routetable.Route) {
+	was := make(map[string]bool, len(before))
+	for _, r := range before {
+		was[strings.ToLower(r.SNI)] = r.Quarantined()
+	}
+	for _, r := range after {
+		prev, known := was[strings.ToLower(r.SNI)]
+		switch {
+		case r.Quarantined() && !prev:
+			log.Printf("route %q quarantined (upstream %s)", r.SNI, r.Upstream)
+		case !r.Quarantined() && prev && known:
+			log.Printf("route %q released from quarantine (upstream %s)", r.SNI, r.Upstream)
+		}
 	}
 }
 

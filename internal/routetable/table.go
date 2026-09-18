@@ -22,17 +22,35 @@ import (
 // OID values to enforce on the internal leg in terminate mode. Shape:
 //
 //	{ "expected_oids": { "1.3.6.1.4.1.65230.2.4": "<hex>" } }
+//
+// State is the route's serving state. Empty (the field is absent from the
+// feed) means active. StateQuarantined means the management service has
+// withdrawn the enclave from service: the gateway keeps the route so it
+// can answer with a clear refusal instead of "application does not
+// exist", and never dials the upstream. Unknown values are treated as
+// active so a newer feed cannot take routes down on an older gateway.
 type Route struct {
 	SNI               string          `json:"sni"`
 	Upstream          string          `json:"upstream"`
 	AttestationPolicy json.RawMessage `json:"attestation_policy,omitempty"`
+	State             string          `json:"state,omitempty"`
+}
+
+// StateQuarantined marks a route whose enclave is withdrawn from service.
+const StateQuarantined = "quarantined"
+
+// Quarantined reports whether the route must be refused without dialing
+// the upstream.
+func (r Route) Quarantined() bool {
+	return r.State == StateQuarantined
 }
 
 // Table is a lock-free routing table. Updates swap the entire map atomically.
 type Table struct {
-	routes  atomic.Pointer[map[string]Route]
-	version atomic.Pointer[string]
-	count   atomic.Int64
+	routes      atomic.Pointer[map[string]Route]
+	version     atomic.Pointer[string]
+	count       atomic.Int64
+	quarantined atomic.Int64
 }
 
 // New creates an empty routing table.
@@ -76,7 +94,11 @@ func (t *Table) Update(routes []Route, version string) bool {
 	}
 
 	m := make(map[string]Route, len(routes))
+	var quarantined int64
 	for _, r := range routes {
+		if r.Quarantined() {
+			quarantined++
+		}
 		// Last write wins. Duplicate SNIs (e.g. legacy apps row + an
 		// app_deployments row) are tolerated; mgmt-service is responsible
 		// for not emitting conflicting upstreams.
@@ -89,6 +111,7 @@ func (t *Table) Update(routes []Route, version string) bool {
 	t.routes.Store(&m)
 	t.version.Store(&version)
 	t.count.Store(int64(len(routes)))
+	t.quarantined.Store(quarantined)
 	return true
 }
 
@@ -120,6 +143,12 @@ func (t *Table) Count() int {
 	return int(t.count.Load())
 }
 
+// QuarantinedCount returns the number of quarantined route entries in the
+// table (counted like Count, before duplicate SNIs collapse).
+func (t *Table) QuarantinedCount() int {
+	return int(t.quarantined.Load())
+}
+
 // ComputeVersion computes a deterministic version string from a set of routes.
 func ComputeVersion(routes []Route) string {
 	sorted := make([]Route, len(routes))
@@ -130,7 +159,13 @@ func ComputeVersion(routes []Route) string {
 
 	h := sha256.New()
 	for _, r := range sorted {
-		fmt.Fprintf(h, "%s\x00%s\x00%s\n", r.SNI, r.Upstream, string(r.AttestationPolicy))
+		fmt.Fprintf(h, "%s\x00%s\x00%s", r.SNI, r.Upstream, string(r.AttestationPolicy))
+		// Only a non-empty state enters the hash, so the version of a
+		// feed that carries no state is unchanged.
+		if r.State != "" {
+			fmt.Fprintf(h, "\x00%s", r.State)
+		}
+		h.Write([]byte("\n"))
 	}
 	return fmt.Sprintf("sha256:%x", h.Sum(nil))
 }
