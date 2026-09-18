@@ -71,10 +71,17 @@ type Gateway struct {
 	bufferSize  int
 	fallbackTLS *tls.Config
 	terminator  Terminator // optional, nil disables terminate mode
+	tracker     *quarantine.Tracker
 
 	listener net.Listener
 	wg       sync.WaitGroup
 	closed   atomic.Bool
+}
+
+// SetTracker registers every spliced connection with t so a quarantine
+// can cut it. Call before Run.
+func (g *Gateway) SetTracker(t *quarantine.Tracker) {
+	g.tracker = t
 }
 
 // Terminator handles the terminate-mode path for a single inbound
@@ -272,6 +279,22 @@ func (g *Gateway) handleConn(clientConn net.Conn) {
 		return
 	}
 	defer backendConn.Close()
+
+	// Track the splice so a quarantine can cut it, then look the route up
+	// again: a quarantine that landed while we dialed is caught here, one
+	// that lands later cuts the connection through the tracker.
+	release := g.tracker.Track(hostname, quarantine.KindSplice, func() {
+		clientConn.Close()
+		backendConn.Close()
+	})
+	defer release()
+	if live, ok := g.table.Lookup(hostname); ok && live.Quarantined() {
+		quarantine.Refused(hostname, quarantine.ModeSplice)
+		log.Printf("refused splice for %q from %s: route quarantined while dialing", hostname, clientConn.RemoteAddr())
+		clientConn.SetWriteDeadline(time.Now().Add(5 * time.Second))
+		_ = quarantine.WriteTLSAlert(clientConn)
+		return
+	}
 
 	// Replay the buffered ClientHello bytes to the backend
 	if _, err := backendConn.Write(buf[:n]); err != nil {

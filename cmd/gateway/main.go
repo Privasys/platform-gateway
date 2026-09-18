@@ -15,6 +15,7 @@ import (
 	"github.com/Privasys/platform-gateway/internal/config"
 	"github.com/Privasys/platform-gateway/internal/health"
 	"github.com/Privasys/platform-gateway/internal/proxy"
+	"github.com/Privasys/platform-gateway/internal/quarantine"
 	"github.com/Privasys/platform-gateway/internal/routetable"
 	routesync "github.com/Privasys/platform-gateway/internal/sync"
 	"github.com/Privasys/platform-gateway/internal/terminate"
@@ -40,6 +41,10 @@ func main() {
 
 	// Route table
 	table := routetable.New()
+
+	// Open traffic per host, cut the moment its route turns quarantined
+	tracker := quarantine.NewTracker()
+	table.OnQuarantine(func(host string) { tracker.CutHost(host) })
 
 	// Route syncer
 	syncer := routesync.New(table, cfg.ManagementURL, cfg.AuthToken, cfg.PollInterval)
@@ -80,6 +85,7 @@ func main() {
 			InsecureSkip: caPool == nil, // no CA pool ⇒ rely on OID policy only
 			CORSOrigins:  splitAndTrim(cfg.CORSOrigins),
 			Lookup:       table.Lookup,
+			Tracker:      tracker,
 		})
 		log.Printf("terminate mode enabled (cert=%s key=%s upstream-ca=%q cors=%q)", cfg.TLSCertPath, cfg.TLSKeyPath, cfg.UpstreamCA, cfg.CORSOrigins)
 	} else {
@@ -88,6 +94,7 @@ func main() {
 
 	// L4 gateway
 	gw := proxy.New(table, cfg.ListenAddr, cfg.DialTimeout, cfg.IdleTimeout, cfg.BufferSize, terminator)
+	gw.SetTracker(tracker)
 
 	// Start route syncer in background
 	go syncer.Run(ctx)

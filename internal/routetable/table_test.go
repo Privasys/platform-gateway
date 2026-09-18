@@ -199,3 +199,37 @@ func TestComputeVersionState(t *testing.T) {
 		t.Errorf("version without state = %q, want legacy %q", got, legacy)
 	}
 }
+
+// TestOnQuarantine checks that the hook fires once per host newly marked
+// quarantined, after the swap, and not for hosts already quarantined, new
+// hosts or releases.
+func TestOnQuarantine(t *testing.T) {
+	table := New()
+	var fired []string
+	table.OnQuarantine(func(host string) {
+		if r, _ := table.Lookup(host); !r.Quarantined() {
+			t.Errorf("hook for %q ran before the swap", host)
+		}
+		fired = append(fired, host)
+	})
+
+	table.Update([]Route{
+		{SNI: "A.example.com", Upstream: "1"},
+		{SNI: "b.example.com", Upstream: "2"},
+	}, "v1")
+	table.Update([]Route{
+		{SNI: "A.example.com", Upstream: "1", State: StateQuarantined},
+		{SNI: "b.example.com", Upstream: "2"},
+		{SNI: "new.example.com", Upstream: "3", State: StateQuarantined},
+	}, "v2")
+	if len(fired) != 1 || fired[0] != "a.example.com" {
+		t.Fatalf("fired = %v, want [a.example.com]", fired)
+	}
+
+	// Still quarantined, then released: no new calls.
+	table.Update([]Route{{SNI: "a.example.com", Upstream: "1", State: StateQuarantined}}, "v3")
+	table.Update([]Route{{SNI: "a.example.com", Upstream: "1"}}, "v4")
+	if len(fired) != 1 {
+		t.Fatalf("fired = %v, want a single call", fired)
+	}
+}

@@ -96,6 +96,10 @@ type Handler struct {
 	// lookup reads the live route table so a quarantine reaches
 	// keep-alive connections opened before it, not only new ones.
 	lookup func(sni string) (routetable.Route, bool)
+
+	// tracker holds the in-flight requests, tunnelled WebSockets and
+	// sealed mux streams per host, so a quarantine can cut them.
+	tracker *quarantine.Tracker
 }
 
 type upstreamProxy struct {
@@ -117,6 +121,9 @@ type Options struct {
 	// route quarantined after the connection was opened is refused
 	// from its next request on. Nil checks the route at connect only.
 	Lookup func(sni string) (routetable.Route, bool)
+	// Tracker, when set, registers open traffic per host so a route
+	// turning quarantined cuts it. Nil tracks nothing.
+	Tracker *quarantine.Tracker
 }
 
 // New creates a Handler. tlsConfig must be set up by the caller (typically
@@ -161,6 +168,7 @@ func New(opts Options) *Handler {
 		proxies:      make(map[string]*upstreamProxy),
 		muxPools:     make(map[string]*gwMuxPool),
 		lookup:       opts.Lookup,
+		tracker:      opts.Tracker,
 	}
 }
 
@@ -241,6 +249,29 @@ func (h *Handler) serveHTTP(tlsConn *tls.Conn, route routetable.Route, rp *httpu
 			return
 		}
 
+		// Track the request while it runs, so a quarantine cuts a
+		// streamed response or a tunnelled WebSocket instead of letting
+		// it keep reaching the enclave, then check again: a quarantine
+		// that landed after the check above is caught here.
+		kind := quarantine.KindHTTP
+		if strings.EqualFold(req.Header.Get("Upgrade"), "websocket") {
+			kind = quarantine.KindWebSocket
+		}
+		// Cancelling the request context tears down the enclave leg too
+		// (the proxied request, or the tunnel of an upgraded WebSocket).
+		ctx, cancelReq := context.WithCancel(req.Context())
+		req = req.WithContext(ctx)
+		release := h.tracker.Track(route.SNI, kind, func() {
+			cancelReq()
+			tlsConn.NetConn().Close()
+		})
+		if h.quarantined(route) {
+			release()
+			cancelReq()
+			h.refuseQuarantined(tlsConn, req, route)
+			return
+		}
+
 		// Set the host header so the upstream sees the public hostname.
 		req.URL.Host = route.Upstream
 		req.URL.Scheme = "https"
@@ -269,6 +300,8 @@ func (h *Handler) serveHTTP(tlsConn *tls.Conn, route routetable.Route, rp *httpu
 				"X-Privasys-Reason, X-Privasys-EncAuth-Reject, X-Privasys-Inner-Status, X-Privasys-Edge")
 		}
 		rp.ServeHTTP(w, req)
+		release()
+		cancelReq()
 
 		// A WebSocket upgrade hijacks the conn: the reverse proxy now owns it
 		// (it wrote the 101 and is pumping bytes between the client and the

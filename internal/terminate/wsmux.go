@@ -34,6 +34,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Privasys/platform-gateway/internal/quarantine"
 	"github.com/Privasys/platform-gateway/internal/routetable"
 	"github.com/coder/websocket"
 	"github.com/prometheus/client_golang/prometheus"
@@ -187,6 +188,23 @@ func (h *Handler) serveSealedWSMux(w *connResponseWriter, req *http.Request, rou
 		return
 	}
 	defer mc.unregister(st, true)
+
+	// Track the stream so a quarantine cuts it (telling the enclave and
+	// the browser), then check again: a quarantine that landed while the
+	// socket was being accepted is caught here.
+	closeQuarantined := func() {
+		_ = mc.writeFrame(muxTypeClose, p.sessionID, p.streamID, encodeMuxClose(websocket.StatusTryAgainLater, ""))
+		st.finish(websocket.StatusTryAgainLater, "enclave quarantined")
+	}
+	release := h.tracker.Track(route.SNI, quarantine.KindSealedWS, closeQuarantined)
+	defer release()
+	if h.quarantined(route) {
+		quarantine.Refused(route.SNI, quarantine.ModeTerminate)
+		log.Printf("terminate: refused sealed WebSocket for %q: route quarantined", route.SNI)
+		st.finish(websocket.StatusTryAgainLater, "enclave quarantined")
+		muxStreamsTotal.WithLabelValues("quarantined").Inc()
+		return
+	}
 
 	if err := mc.writeFrame(muxTypeOpen, p.sessionID, p.streamID, encodeMuxOpen(host, uri, openEnv)); err != nil {
 		browser.Close(websocket.StatusBadGateway, "enclave mux unavailable")

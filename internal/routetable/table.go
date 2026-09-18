@@ -51,6 +51,16 @@ type Table struct {
 	version     atomic.Pointer[string]
 	count       atomic.Int64
 	quarantined atomic.Int64
+
+	onQuarantine atomic.Pointer[func(host string)]
+}
+
+// OnQuarantine sets fn to be called, after the new table is in place, for
+// every host an Update newly marks quarantined (it was active before). It
+// lets the gateway cut connections already open to that host. fn must not
+// block for long: it runs on the updating goroutine.
+func (t *Table) OnQuarantine(fn func(host string)) {
+	t.onQuarantine.Store(&fn)
 }
 
 // New creates an empty routing table.
@@ -108,10 +118,23 @@ func (t *Table) Update(routes []Route, version string) bool {
 		m[strings.ToLower(r.SNI)] = r
 	}
 
-	t.routes.Store(&m)
+	prev := t.routes.Swap(&m)
 	t.version.Store(&version)
 	t.count.Store(int64(len(routes)))
 	t.quarantined.Store(quarantined)
+
+	// Notify after the swap: a connection that registers after the hook
+	// ran looks the route up again and already sees the quarantine.
+	if fn := t.onQuarantine.Load(); fn != nil && *fn != nil && quarantined > 0 {
+		for host, r := range m {
+			if !r.Quarantined() {
+				continue
+			}
+			if old, ok := (*prev)[host]; ok && !old.Quarantined() {
+				(*fn)(host)
+			}
+		}
+	}
 	return true
 }
 

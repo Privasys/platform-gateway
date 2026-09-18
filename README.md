@@ -44,7 +44,9 @@ A route entry may carry an optional `state`. A missing `state` means the route i
   Clients that ask for `text/html` first (browsers loading a page) get a short HTML page with the same message. CORS preflights are still answered and the refusal carries the CORS headers, so a cross-origin SDK can read it. The live table is checked before each request, so a keep-alive connection opened before the quarantine is refused from its next request on.
 - **Splice mode** (`privasys-ratls/1` clients) cannot answer in HTTP because the TLS session belongs to the enclave. The gateway answers the ClientHello with a fatal TLS `handshake_failure` alert and closes the connection.
 
-Each refusal is logged and counted in `gateway_quarantine_refusals_total`. When the `state` disappears from the feed (release), the next sync serves the route again. The management route of an enclave (`<enclave>-mgr`) is not quarantined, so operators can still reach it.
+Traffic already open to a host is cut the moment a route sync marks it quarantined, since RA-TLS SDKs and sealed WebSockets hold long-lived connections: spliced connections are closed, in-flight terminated requests (streamed responses included) and WebSockets tunnelled to the enclave are closed on both legs, and sealed WebSocket streams on the enclave mux are closed with status `1013` (try again later) after the enclave is told to drop them. Idle keep-alive terminate connections stay open and get the 503 on their next request.
+
+Each refusal is logged and counted in `gateway_quarantine_refusals_total`, and each cut in `gateway_quarantine_cuts_total`. When the `state` disappears from the feed (release), the next sync serves the route again. The management route of an enclave (`<enclave>-mgr`) is not quarantined, so operators can still reach it.
 
 ## Configuration
 
@@ -100,6 +102,7 @@ docker run -p 443:443 -p 9090:9090 \
 | `gateway_connection_errors_total` | Counter | Errors by reason (`client_read`, `sni_parse`, `no_route`, `dial_upstream`, `write_upstream`) |
 | `gateway_bytes_total` | Counter | Bytes transferred by direction (`client_to_upstream`, `upstream_to_client`) |
 | `gateway_quarantine_refusals_total` | Counter | Requests (terminate) and connections (splice) refused because their route is quarantined, by `host` and `mode` (`terminate`, `splice`) |
+| `gateway_quarantine_cuts_total` | Counter | Open connections and streams closed because their route became quarantined, by `host` and `mode` (`splice`, `http`, `websocket`, `sealed_ws`) |
 
 ## Deployment
 
