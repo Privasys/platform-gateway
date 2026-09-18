@@ -25,6 +25,27 @@ Client                    Gateway                     Enclave
 
 The gateway periodically polls the management service `GET /api/v1/internal/routes` to build its routing table. ETag-based conditional requests minimise bandwidth.
 
+### Route States
+
+A route entry may carry an optional `state`. A missing `state` means the route is active, so feeds and gateways that predate the field keep working. Unknown values are treated as active.
+
+```json
+{ "sni": "myapp.apps.privasys.org", "upstream": "141.94.219.130:8445", "state": "quarantined" }
+```
+
+`quarantined` means the management service has withdrawn the route's enclave from service. The gateway keeps the route, never dials the upstream, and refuses clients with a clear reason instead of the 404 an unknown host gets:
+
+- **Terminate mode** answers every request, sealed WebSocket upgrades included, with `503 Service Unavailable`, `Retry-After: 300` and `Cache-Control: no-store`. API clients get a JSON body:
+
+  ```json
+  {"error":"enclave_quarantined","message":"This application is temporarily unavailable while its enclave's clock is checked."}
+  ```
+
+  Clients that ask for `text/html` first (browsers loading a page) get a short HTML page with the same message. CORS preflights are still answered and the refusal carries the CORS headers, so a cross-origin SDK can read it. The live table is checked before each request, so a keep-alive connection opened before the quarantine is refused from its next request on.
+- **Splice mode** (`privasys-ratls/1` clients) cannot answer in HTTP because the TLS session belongs to the enclave. The gateway answers the ClientHello with a fatal TLS `handshake_failure` alert and closes the connection.
+
+Each refusal is logged and counted in `gateway_quarantine_refusals_total`. When the `state` disappears from the feed (release), the next sync serves the route again. The management route of an enclave (`<enclave>-mgr`) is not quarantined, so operators can still reach it.
+
 ## Configuration
 
 | Flag | Env | Default | Description |
@@ -66,7 +87,7 @@ docker run -p 443:443 -p 9090:9090 \
 
 | Path | Description |
 |---|---|
-| `/healthz` | Health check with route count, version, sync status |
+| `/healthz` | Health check with route count, quarantined route count, version, sync status |
 | `/readyz` | Returns 503 until first successful route sync |
 | `/metrics` | Prometheus metrics |
 
@@ -78,6 +99,7 @@ docker run -p 443:443 -p 9090:9090 \
 | `gateway_connections_active` | Gauge | Currently active connections |
 | `gateway_connection_errors_total` | Counter | Errors by reason (`client_read`, `sni_parse`, `no_route`, `dial_upstream`, `write_upstream`) |
 | `gateway_bytes_total` | Counter | Bytes transferred by direction (`client_to_upstream`, `upstream_to_client`) |
+| `gateway_quarantine_refusals_total` | Counter | Requests (terminate) and connections (splice) refused because their route is quarantined, by `host` and `mode` (`terminate`, `splice`) |
 
 ## Deployment
 
