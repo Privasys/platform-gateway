@@ -42,13 +42,14 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"status":     "ok",
-		"routes":     s.table.Count(),
-		"version":    s.table.Version(),
-		"last_sync":  formatTime(s.syncer.LastSync()),
-		"last_error": formatError(s.syncer.LastError()),
-		"syncs":      s.syncer.SyncCount(),
-		"errors":     s.syncer.ErrorCount(),
+		"status":      "ok",
+		"routes":      s.table.Count(),
+		"quarantined": s.table.QuarantinedCount(),
+		"version":     s.table.Version(),
+		"last_sync":   formatTime(s.syncer.LastSync()),
+		"last_error":  formatError(s.syncer.LastError()),
+		"syncs":       s.syncer.SyncCount(),
+		"errors":      s.syncer.ErrorCount(),
 	})
 }
 

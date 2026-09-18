@@ -79,6 +79,7 @@ func main() {
 			CACertPool:   caPool,
 			InsecureSkip: caPool == nil, // no CA pool ⇒ rely on OID policy only
 			CORSOrigins:  splitAndTrim(cfg.CORSOrigins),
+			Lookup:       table.Lookup,
 		})
 		log.Printf("terminate mode enabled (cert=%s key=%s upstream-ca=%q cors=%q)", cfg.TLSCertPath, cfg.TLSKeyPath, cfg.UpstreamCA, cfg.CORSOrigins)
 	} else {

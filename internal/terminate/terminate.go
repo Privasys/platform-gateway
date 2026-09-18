@@ -40,6 +40,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Privasys/platform-gateway/internal/quarantine"
 	"github.com/Privasys/platform-gateway/internal/routetable"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
@@ -91,6 +92,10 @@ type Handler struct {
 	// reset like proxies when the route's policy or SNI changes.
 	muxMu    sync.Mutex
 	muxPools map[string]*gwMuxPool
+
+	// lookup reads the live route table so a quarantine reaches
+	// keep-alive connections opened before it, not only new ones.
+	lookup func(sni string) (routetable.Route, bool)
 }
 
 type upstreamProxy struct {
@@ -107,6 +112,11 @@ type Options struct {
 	CACertPool   *x509.CertPool // pool used to validate upstream RA-TLS certs (the enclave's intermediary CA chain)
 	InsecureSkip bool           // dev/test only: skip RA-TLS chain validation, only enforce expected-OID policy
 	CORSOrigins  []string       // allowed CORS origins; empty disables CORS injection (enclave is expected to handle it)
+	// Lookup, when set, is consulted before every request on a
+	// terminated connection (typically routetable.Table.Lookup) so a
+	// route quarantined after the connection was opened is refused
+	// from its next request on. Nil checks the route at connect only.
+	Lookup func(sni string) (routetable.Route, bool)
 }
 
 // New creates a Handler. tlsConfig must be set up by the caller (typically
@@ -150,6 +160,7 @@ func New(opts Options) *Handler {
 		corsSuffixes: suffixes,
 		proxies:      make(map[string]*upstreamProxy),
 		muxPools:     make(map[string]*gwMuxPool),
+		lookup:       opts.Lookup,
 	}
 }
 
@@ -170,6 +181,13 @@ func (h *Handler) Handle(clientConn net.Conn, clientHello []byte, route routetab
 		return
 	}
 	tlsConn.SetDeadline(time.Time{})
+
+	// A quarantined route never reaches the upstream: skip the proxy
+	// setup and let the request loop answer every request with a 503.
+	if route.Quarantined() {
+		h.serveHTTP(tlsConn, route, nil)
+		return
+	}
 
 	rp, err := h.proxyFor(route)
 	if err != nil {
@@ -205,6 +223,14 @@ func (h *Handler) serveHTTP(tlsConn *tls.Conn, route routetable.Route, rp *httpu
 		if req.Method == http.MethodOptions && h.isAllowedOrigin(req.Header.Get("Origin")) {
 			writeCORSPreflight(tlsConn, req)
 			continue
+		}
+
+		// Quarantined route: refuse every request, sealed WebSocket
+		// upgrades included, without touching the upstream. The CORS
+		// headers let a cross-origin SDK read the reason.
+		if rp == nil || h.quarantined(route) {
+			h.refuseQuarantined(tlsConn, req, route)
+			return
 		}
 
 		// Sealed WebSocket: terminate the browser socket here and relay it
@@ -517,6 +543,36 @@ func writeStatus(w io.Writer, code int, msg string) {
 	body := fmt.Sprintf("%d %s\n", code, msg)
 	fmt.Fprintf(w, "HTTP/1.1 %d %s\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s",
 		code, http.StatusText(code), len(body), body)
+}
+
+// quarantined reports whether route is quarantined, either as it was when
+// the connection was opened or in the live route table.
+func (h *Handler) quarantined(route routetable.Route) bool {
+	if route.Quarantined() {
+		return true
+	}
+	if h.lookup == nil {
+		return false
+	}
+	live, ok := h.lookup(route.SNI)
+	return ok && live.Quarantined()
+}
+
+// refuseQuarantined answers req with the quarantine 503 and records it.
+func (h *Handler) refuseQuarantined(w io.Writer, req *http.Request, route routetable.Route) {
+	quarantine.Refused(route.SNI, quarantine.ModeTerminate)
+	log.Printf("terminate: refused %s %s for %q: route quarantined", req.Method, req.URL.Path, route.SNI)
+	var extra http.Header
+	if origin := req.Header.Get("Origin"); origin != "" && h.isAllowedOrigin(origin) {
+		extra = http.Header{}
+		extra.Set("Access-Control-Allow-Origin", origin)
+		extra.Set("Access-Control-Allow-Credentials", "true")
+		extra.Set("Access-Control-Expose-Headers", "Retry-After")
+		extra.Set("Vary", "Origin")
+	}
+	if err := quarantine.WriteHTTP(w, req, extra); err != nil && !isClosedConn(err) {
+		log.Printf("terminate: write quarantine refusal for %q: %v", route.SNI, err)
+	}
 }
 
 // isAllowedOrigin reports whether origin is in the gateway's allow-list.

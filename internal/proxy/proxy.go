@@ -18,6 +18,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/Privasys/platform-gateway/internal/quarantine"
 	"github.com/Privasys/platform-gateway/internal/routetable"
 	"github.com/Privasys/platform-gateway/internal/sni"
 	"github.com/prometheus/client_golang/prometheus"
@@ -249,6 +250,17 @@ func (g *Gateway) handleConn(clientConn net.Conn) {
 	ratlsCapable := sni.HasALPN(alpns, "privasys-ratls/1")
 	if !ratlsCapable && g.terminator != nil {
 		g.terminator.Handle(clientConn, buf[:n], route)
+		return
+	}
+
+	// A quarantined route is never dialed. The TLS session would belong
+	// to the enclave, so there is no HTTP to answer with: send a fatal
+	// alert in place of the ServerHello and close.
+	if route.Quarantined() {
+		quarantine.Refused(hostname, quarantine.ModeSplice)
+		log.Printf("refused splice for %q from %s: route quarantined", hostname, clientConn.RemoteAddr())
+		clientConn.SetWriteDeadline(time.Now().Add(5 * time.Second))
+		_ = quarantine.WriteTLSAlert(clientConn)
 		return
 	}
 
