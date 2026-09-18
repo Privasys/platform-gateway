@@ -4,7 +4,9 @@ SNI-based L4 TCP gateway for routing `*.apps.privasys.org` traffic to the correc
 
 ## Overview
 
-The gateway inspects the TLS ClientHello SNI extension to determine the target hostname, looks up the backend address from an in-memory routing table, and splices the raw TCP connection to the upstream enclave — **without terminating TLS**. This preserves the end-to-end encryption between client and enclave.
+The gateway inspects the TLS ClientHello SNI extension to determine the target hostname, looks up the backend address from an in-memory routing table, and splices the raw TCP connection to the upstream enclave — **without terminating TLS**. This preserves the end-to-end encryption between client and enclave. When a public certificate is configured (`-tls-cert`), clients that do not advertise the `privasys-ratls/1` ALPN (browsers, curl) are served in terminate mode instead: the gateway presents the public certificate and opens an internal RA-TLS connection to the enclave on their behalf.
+
+The gateway also enforces the platform's trusted-time quarantine. Every enclave runtime checks its host clock against the platform monitor (`platform-monitoring`, an instance of [container-app-service-monitoring](https://github.com/Privasys/container-app-service-monitoring/blob/main/docs/platform-clock.md)) and NTS servers; when an enclave's host clock is wrong, or the monitor cannot check it, its routes arrive `quarantined` and the gateway refuses them until the monitor releases the enclave. See [Route States](#route-states).
 
 ### Architecture
 
@@ -33,7 +35,7 @@ A route entry may carry an optional `state`. A missing `state` means the route i
 { "sni": "myapp.apps.privasys.org", "upstream": "141.94.219.130:8445", "state": "quarantined" }
 ```
 
-`quarantined` means the management service has withdrawn the route's enclave from service. The gateway keeps the route, never dials the upstream, and refuses clients with a clear reason instead of the 404 an unknown host gets:
+`quarantined` means the management service has withdrawn the route's enclave from service, today at the request of the platform clock monitor when the enclave's host clock is wrong or cannot be checked. The gateway keeps the route, never dials the upstream, and refuses clients with a clear reason instead of the 404 an unknown host gets:
 
 - **Terminate mode** answers every request, sealed WebSocket upgrades included, with `503 Service Unavailable`, `Retry-After: 300` and `Cache-Control: no-store`. API clients get a JSON body:
 
@@ -46,7 +48,7 @@ A route entry may carry an optional `state`. A missing `state` means the route i
 
 Traffic already open to a host is cut the moment a route sync marks it quarantined, since RA-TLS SDKs and sealed WebSockets hold long-lived connections: spliced connections are closed, in-flight terminated requests (streamed responses included) and WebSockets tunnelled to the enclave are closed on both legs, and sealed WebSocket streams on the enclave mux are closed with status `1013` (try again later) after the enclave is told to drop them. Idle keep-alive terminate connections stay open and get the 503 on their next request.
 
-Each refusal is logged and counted in `gateway_quarantine_refusals_total`, and each cut in `gateway_quarantine_cuts_total`. When the `state` disappears from the feed (release), the next sync serves the route again. The management route of an enclave (`<enclave>-mgr`) is not quarantined, so operators can still reach it.
+Each refusal is logged and counted in `gateway_quarantine_refusals_total`, and each cut in `gateway_quarantine_cuts_total`. When the `state` disappears from the feed (release), the next sync serves the route again. The management route of an enclave (`<enclave>-mgr`) is not quarantined, so the clock monitor and operators can still reach it.
 
 ## Configuration
 
