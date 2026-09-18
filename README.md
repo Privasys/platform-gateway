@@ -4,7 +4,7 @@ SNI-based L4 TCP gateway for routing `*.apps.privasys.org` traffic to the correc
 
 ## Overview
 
-The gateway inspects the TLS ClientHello SNI extension to determine the target hostname, looks up the backend address from an in-memory routing table, and splices the raw TCP connection to the upstream enclave — **without terminating TLS**. This preserves the end-to-end encryption between client and enclave. When a public certificate is configured (`-tls-cert`), clients that do not advertise the `privasys-ratls/1` ALPN (browsers, curl) are served in terminate mode instead: the gateway presents the public certificate and opens an internal RA-TLS connection to the enclave on their behalf.
+The gateway inspects the TLS ClientHello SNI extension to determine the target hostname, looks up the backend address from an in-memory routing table, and splices the raw TCP connection to the upstream enclave, **without terminating TLS**. This preserves the end-to-end encryption between client and enclave. When a public certificate is configured (`-tls-cert`), clients that do not advertise the `privasys-ratls/1` ALPN (browsers, curl) are served in terminate mode instead: the gateway presents the public certificate and opens an internal RA-TLS connection to the enclave on their behalf.
 
 The gateway also enforces the platform's trusted-time quarantine. Every enclave runtime checks its host clock against the platform monitor (`platform-monitoring`, an instance of [container-app-service-monitoring](https://github.com/Privasys/container-app-service-monitoring/blob/main/docs/platform-clock.md)) and NTS servers; when an enclave's host clock is wrong, or the monitor cannot check it, its routes arrive `quarantined` and the gateway refuses them until the monitor releases the enclave. See [Route States](#route-states).
 
@@ -118,4 +118,4 @@ Both gateways independently poll routes and operate identically.
 
 ## License
 
-AGPL-3.0 — see [LICENSE](LICENSE).
+AGPL-3.0: see [LICENSE](LICENSE).
