@@ -61,6 +61,11 @@ var (
 	}, []string{"result"})
 )
 
+// acmeALPNProto is the protocol a TLS-ALPN-01 challenge negotiates
+// (RFC 8737). Kept as a literal so this package does not depend on the ACME
+// client; certmgr owns issuance.
+const acmeALPNProto = "acme-tls/1"
+
 // PolicyDoc is the on-the-wire shape of attestation_policy.
 type PolicyDoc struct {
 	ExpectedOIDs map[string]string `json:"expected_oids,omitempty"`
@@ -189,6 +194,13 @@ func (h *Handler) Handle(clientConn net.Conn, clientHello []byte, route routetab
 		return
 	}
 	tlsConn.SetDeadline(time.Time{})
+
+	// A TLS-ALPN-01 challenge is a handshake and nothing more: the CA closes
+	// the connection without sending a request. Reading one would log a
+	// malformed request for every certificate we obtain.
+	if tlsConn.ConnectionState().NegotiatedProtocol == acmeALPNProto {
+		return
+	}
 
 	// A quarantined route never reaches the upstream: skip the proxy
 	// setup and let the request loop answer every request with a 503.
