@@ -333,9 +333,13 @@ func (h *Handler) serveHTTP(tlsConn *tls.Conn, route routetable.Route, rp *httpu
 // `confidential-ai` on the same enclave; the gateway kept rewriting
 // Host to `confidential-ai-demo.apps-test.privasys.org` for several
 // minutes after the route table updated.
+// On an alias route every upstream-facing name is the canonical app
+// hostname, not the adopter's: route.UpstreamName() is used for the SNI we
+// present, the Host we rewrite to, the attestation check and the cache key.
 func (h *Handler) proxyFor(route routetable.Route) (*httputil.ReverseProxy, error) {
 	policyHash := hashPolicy(route.AttestationPolicy)
-	key := route.Upstream + "|" + route.SNI + "|" + policyHash
+	upstreamName := route.UpstreamName()
+	key := route.Upstream + "|" + upstreamName + "|" + policyHash
 
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -373,14 +377,14 @@ func (h *Handler) proxyFor(route routetable.Route) (*httputil.ReverseProxy, erro
 			// extra OID-based policy enforcement is what actually pins the
 			// expected enclave identity.
 			InsecureSkipVerify:    true,
-			VerifyPeerCertificate: makeRATLSVerifier(h.caCertPool, h.insecureSkip, policy, route.SNI),
+			VerifyPeerCertificate: makeRATLSVerifier(h.caCertPool, h.insecureSkip, policy, upstreamName),
 			MinVersion:            tls.VersionTLS12,
 			// ServerName drives the ClientHello SNI. The upstream is
 			// usually an IP address, in which case Go would otherwise
 			// default to the IP literal as SNI — many enclave TLS
 			// servers reject that with "tls: internal error" because
 			// their cert is bound to the public hostname.
-			ServerName: route.SNI,
+			ServerName: upstreamName,
 		},
 		MaxIdleConnsPerHost: 8,
 		IdleConnTimeout:     h.idleTimeout,
@@ -444,7 +448,7 @@ func (h *Handler) proxyFor(route routetable.Route) (*httputil.ReverseProxy, erro
 	originalDirector := rp.Director
 	rp.Director = func(req *http.Request) {
 		originalDirector(req)
-		req.Host = route.SNI // upstream may use it for vhost routing
+		req.Host = upstreamName // upstream may use it for vhost routing
 		req.Header.Del("X-Forwarded-Proto")
 		req.Header.Set("X-Forwarded-Proto", "https")
 		// Trusted terminate marker: tells the enclave that a party other

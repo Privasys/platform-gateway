@@ -28,6 +28,14 @@ type Config struct {
 	TLSKeyPath  string // path to wildcard cert key PEM
 	UpstreamCA  string // optional CA bundle to validate enclave RA-TLS chains; empty enforces only OID policy
 	CORSOrigins string // comma-separated list of allowed CORS origins for terminate-mode routes; empty disables CORS
+
+	// Adopter hostnames (alias routes). When ACMECacheDir is set, the
+	// gateway obtains a Let's Encrypt certificate per published alias over
+	// TLS-ALPN-01, gated on the route table. Empty leaves the gateway
+	// serving the wildcard only.
+	ACMECacheDir  string // directory for issued certificates and the ACME account key
+	ACMEEmail     string // ACME account contact address (optional)
+	ACMEDirectory string // ACME directory URL; empty = Let's Encrypt production
 }
 
 // Load parses configuration from CLI flags with env var fallbacks.
@@ -46,6 +54,9 @@ func Load() (*Config, error) {
 	flag.StringVar(&cfg.TLSKeyPath, "tls-key", envOr("GATEWAY_TLS_KEY", ""), "Path to public TLS wildcard certificate key PEM")
 	flag.StringVar(&cfg.UpstreamCA, "upstream-ca", envOr("GATEWAY_UPSTREAM_CA", ""), "Optional CA bundle to validate enclave RA-TLS chains in terminate mode")
 	flag.StringVar(&cfg.CORSOrigins, "cors-origins", envOr("GATEWAY_CORS_ORIGINS", ""), "Comma-separated list of allowed CORS origins for terminate-mode routes. Supports exact origins (https://chat.privasys.org) and wildcard suffixes (*.privasys.org or https://*.privasys.org). Empty disables CORS.")
+	flag.StringVar(&cfg.ACMECacheDir, "acme-cache", envOr("GATEWAY_ACME_CACHE", ""), "Directory for certificates issued for adopter hostnames and the ACME account key. Empty disables per-host issuance.")
+	flag.StringVar(&cfg.ACMEEmail, "acme-email", envOr("GATEWAY_ACME_EMAIL", ""), "Contact address for the ACME account used for adopter hostnames")
+	flag.StringVar(&cfg.ACMEDirectory, "acme-directory", envOr("GATEWAY_ACME_DIRECTORY", ""), "ACME directory URL for adopter hostnames; empty uses Let's Encrypt production")
 
 	flag.Parse()
 

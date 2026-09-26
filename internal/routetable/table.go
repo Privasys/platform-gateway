@@ -34,6 +34,26 @@ type Route struct {
 	Upstream          string          `json:"upstream"`
 	AttestationPolicy json.RawMessage `json:"attestation_policy,omitempty"`
 	State             string          `json:"state,omitempty"`
+	// Canonical is set on an ALIAS route: an adopter's own hostname
+	// standing in front of an app whose platform hostname is Canonical.
+	// The browser sees SNI; everything upstream keeps the canonical name
+	// (the SNI presented to the enclave, the Host header, the certificate
+	// the attestation policy is checked against), so no attested leg ever
+	// learns the adopter's hostname and the enclave needs no route for it.
+	Canonical string `json:"canonical,omitempty"`
+}
+
+// IsAlias reports whether this route is an adopter hostname standing in for
+// a platform app hostname.
+func (r Route) IsAlias() bool { return r.Canonical != "" && r.Canonical != r.SNI }
+
+// UpstreamName is the hostname the upstream enclave knows itself by: the
+// canonical app hostname for an alias route, else the route's own SNI.
+func (r Route) UpstreamName() string {
+	if r.IsAlias() {
+		return r.Canonical
+	}
+	return r.SNI
 }
 
 // StateQuarantined marks a route whose enclave is withdrawn from service.

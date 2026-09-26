@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/Privasys/platform-gateway/internal/certloader"
+	"github.com/Privasys/platform-gateway/internal/certmgr"
 	"github.com/Privasys/platform-gateway/internal/config"
 	"github.com/Privasys/platform-gateway/internal/health"
 	"github.com/Privasys/platform-gateway/internal/proxy"
@@ -77,8 +78,25 @@ func main() {
 				log.Fatalf("upstream-ca: no certificates parsed from %s", cfg.UpstreamCA)
 			}
 		}
+		// Certificate resolution per ClientHello: the platform wildcard for
+		// our own hostnames, and Let's Encrypt per adopter hostname when a
+		// cache directory is configured. Issuance is gated on the route
+		// table, so only a published alias can trigger it.
+		resolver, err := certmgr.New(certmgr.Options{
+			Wildcard:     loader,
+			CacheDir:     cfg.ACMECacheDir,
+			Email:        cfg.ACMEEmail,
+			DirectoryURL: cfg.ACMEDirectory,
+			Lookup:       table.Lookup,
+		})
+		if err != nil {
+			log.Fatalf("certmgr: %v", err)
+		}
+		if resolver.ACMEEnabled() {
+			log.Printf("adopter hostnames enabled (acme cache=%s directory=%q)", cfg.ACMECacheDir, cfg.ACMEDirectory)
+		}
 		terminator = terminate.New(terminate.Options{
-			TLSConfig:    loader.TLSConfig(),
+			TLSConfig:    resolver.TLSConfig(),
 			DialTimeout:  cfg.DialTimeout,
 			IdleTimeout:  cfg.IdleTimeout,
 			CACertPool:   caPool,

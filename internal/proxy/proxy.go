@@ -254,8 +254,19 @@ func (g *Gateway) handleConn(clientConn net.Conn) {
 	//   - Everything else (browsers, curl) gets terminate when configured,
 	//     so they see the LE wildcard cert and the gateway opens an internal
 	//     RA-TLS connection to the enclave on their behalf.
+	// An ALIAS route (an adopter's own hostname in front of an app) is
+	// browser-facing only and always terminates here. The enclave has no
+	// route for that hostname, so a splice would hand the client a cert for
+	// a name the enclave cannot serve; terminating also rewrites the Host
+	// to the canonical app hostname the enclave does know.
 	ratlsCapable := sni.HasALPN(alpns, "privasys-ratls/1")
-	if !ratlsCapable && g.terminator != nil {
+	if route.IsAlias() && g.terminator == nil {
+		connErrors.WithLabelValues("alias_without_terminator").Inc()
+		log.Printf("no terminator for alias route %q from %s", hostname, clientConn.RemoteAddr())
+		g.send404(clientConn, buf[:n], hostname)
+		return
+	}
+	if (!ratlsCapable || route.IsAlias()) && g.terminator != nil {
 		g.terminator.Handle(clientConn, buf[:n], route)
 		return
 	}
