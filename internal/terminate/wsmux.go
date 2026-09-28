@@ -32,6 +32,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/Privasys/platform-gateway/internal/quarantine"
@@ -62,10 +63,15 @@ const (
 	// gwMuxPoolSize is the number of mux connections kept per upstream.
 	// Every browser WebSocket for that enclave rides one of these.
 	gwMuxPoolSize = 2
-	// gwMuxStreamQueue is the per-stream enclave->browser buffer (frames);
-	// a browser that stops draining gets its stream closed rather than
-	// stalling the shared connection.
-	gwMuxStreamQueue = 32
+	// gwMuxStreamQueue and gwMuxStreamQueueBytes bound the per-stream
+	// enclave->browser buffer: a browser that stops draining gets its stream
+	// closed rather than stalling the shared connection. The bound is in
+	// bytes, with a frame count only as a backstop: an agent UI streams
+	// hundreds of small frames in a burst (reasoning deltas, a large tool
+	// result), and a 32-frame buffer closed healthy streams whenever a busy
+	// tab fell a moment behind.
+	gwMuxStreamQueue      = 4096
+	gwMuxStreamQueueBytes = 8 << 20
 	// gwMuxPingEvery / gwMuxReadIdle: the gateway pings each mux conn and
 	// expects SOME frame well inside the idle window.
 	gwMuxPingEvery = 30 * time.Second
@@ -221,6 +227,7 @@ func (h *Handler) serveSealedWSMux(w *connResponseWriter, req *http.Request, rou
 			case <-st.done:
 				return
 			case payload = <-st.outbound:
+				st.queued.Add(-int64(len(payload)))
 			}
 			wctx, cancel := context.WithTimeout(context.Background(), gwMuxWriteTimeout)
 			err := browser.Write(wctx, websocket.MessageBinary, payload)
@@ -423,8 +430,10 @@ type gwStream struct {
 	key      muxKey
 	browser  *websocket.Conn
 	outbound chan []byte
-	done     chan struct{}
-	once     sync.Once
+	// queued is the bytes waiting in outbound (gwMuxStreamQueueBytes).
+	queued atomic.Int64
+	done   chan struct{}
+	once   sync.Once
 }
 
 // finish closes the browser side exactly once and marks the stream done.
@@ -516,9 +525,17 @@ func (c *gwMuxConn) readLoop() {
 				_ = c.writeFrame(muxTypeClose, sid, stream, encodeMuxClose(websocket.StatusProtocolError, "unknown stream"))
 				continue
 			}
-			select {
-			case st.outbound <- payload:
-			default:
+			overflow := st.queued.Load()+int64(len(payload)) > gwMuxStreamQueueBytes
+			if !overflow {
+				select {
+				case st.outbound <- payload:
+					st.queued.Add(int64(len(payload)))
+				default:
+					overflow = true
+				}
+			}
+			if overflow {
+				log.Printf("wsmux: closing stream %s/%d: the browser fell %d bytes (%d frames) behind", shortSID(sid), stream, st.queued.Load(), len(st.outbound))
 				_ = c.writeFrame(muxTypeClose, sid, stream, encodeMuxClose(websocket.StatusPolicyViolation, "browser backpressure overflow"))
 				c.unregister(st, false)
 				st.finish(websocket.StatusPolicyViolation, "backpressure overflow")
@@ -639,4 +656,13 @@ func readMuxFrame(br *bufio.Reader) (typ byte, sid string, stream uint64, payloa
 		return 0, "", 0, nil, err
 	}
 	return typ, sid, stream, payload, nil
+}
+
+// shortSID is a session id as the log may carry it: enough to correlate,
+// never enough to present.
+func shortSID(sid string) string {
+	if len(sid) > 8 {
+		return sid[:8] + "…"
+	}
+	return sid
 }
