@@ -136,8 +136,9 @@ func (a *Acceptor) Handle(conn net.Conn, clientHello []byte) {
 	log.Printf("tunnel: enclave %s disconnected (%s)", enclaveID, remote)
 }
 
-// authHeaders keeps only what the authorizer needs: the enclaveauth headers
-// and, for enclaves without a signer, a bearer.
+// authHeaders keeps only the enclaveauth headers. A bearer is never
+// forwarded: tunnels open on attested identity alone, and an enclave's
+// credential must not transit a gateway.
 func authHeaders(h http.Header) map[string]string {
 	out := make(map[string]string)
 	for k, v := range h {
@@ -145,7 +146,7 @@ func authHeaders(h http.Header) map[string]string {
 			continue
 		}
 		ck := http.CanonicalHeaderKey(k)
-		if strings.HasPrefix(ck, "X-Enclave-") || ck == "Authorization" {
+		if strings.HasPrefix(ck, "X-Enclave-") {
 			out[ck] = v[0]
 		}
 	}

@@ -228,3 +228,21 @@ func TestEnclaveID(t *testing.T) {
 		}
 	}
 }
+
+func TestAuthHeadersNeverForwardBearer(t *testing.T) {
+	h := http.Header{}
+	h.Set("Authorization", "Bearer enclave-credential")
+	h.Set("X-Enclave-Id", "3f2a9c1e-5b7d-4e8a-9c21-7d4e5f6a8b90")
+	h.Set("X-Enclave-Sig", "c2ln")
+	h.Set("Cookie", "a=b")
+	got := authHeaders(h)
+	if _, ok := got["Authorization"]; ok {
+		t.Fatal("a bearer was forwarded to the authorizer")
+	}
+	if _, ok := got["Cookie"]; ok {
+		t.Fatal("an unrelated header was forwarded")
+	}
+	if got["X-Enclave-Id"] == "" || got["X-Enclave-Sig"] == "" {
+		t.Fatalf("enclaveauth headers dropped: %v", got)
+	}
+}
