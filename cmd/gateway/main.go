@@ -20,6 +20,7 @@ import (
 	"github.com/Privasys/platform-gateway/internal/routetable"
 	routesync "github.com/Privasys/platform-gateway/internal/sync"
 	"github.com/Privasys/platform-gateway/internal/terminate"
+	"github.com/Privasys/platform-gateway/internal/tunnel"
 )
 
 // Set at build time via -ldflags
@@ -58,6 +59,13 @@ func main() {
 		ReadTimeout:  5 * time.Second,
 		WriteTimeout: 5 * time.Second,
 	}
+
+	// Upstream dialer: TCP, or a stream on the enclave's tunnel for
+	// "tunnel:<enclave_id>" routes. Without -tunnels the registry stays
+	// empty and such routes fail to dial.
+	tunnels := tunnel.NewRegistry()
+	dialer := &tunnel.Dialer{Registry: tunnels}
+	var tunnelAcceptor *tunnel.Acceptor
 
 	// Optional terminate-mode handler. Enabled when wildcard cert paths
 	// are configured. Reloads on SIGHUP via certloader's signal handler.
@@ -104,7 +112,13 @@ func main() {
 			CORSOrigins:  splitAndTrim(cfg.CORSOrigins),
 			Lookup:       table.Lookup,
 			Tracker:      tracker,
+			Dial:         dialer.DialUpstream,
 		})
+		if cfg.Tunnels {
+			tunnelAcceptor = tunnel.NewAcceptor(resolver.TLSConfig(),
+				tunnel.NewMgmtAuthorizer(cfg.ManagementURL, cfg.AuthToken), tunnels)
+			log.Printf("enclave tunnels enabled (ALPN %s)", tunnel.ALPN)
+		}
 		log.Printf("terminate mode enabled (cert=%s key=%s upstream-ca=%q cors=%q)", cfg.TLSCertPath, cfg.TLSKeyPath, cfg.UpstreamCA, cfg.CORSOrigins)
 	} else {
 		log.Printf("terminate mode disabled (no -tls-cert configured); every connection will be spliced")
@@ -113,6 +127,10 @@ func main() {
 	// L4 gateway
 	gw := proxy.New(table, cfg.ListenAddr, cfg.DialTimeout, cfg.IdleTimeout, cfg.BufferSize, terminator)
 	gw.SetTracker(tracker)
+	gw.SetDialer(dialer.DialUpstream)
+	if tunnelAcceptor != nil {
+		gw.SetTunnelAcceptor(tunnelAcceptor)
+	}
 
 	// Start route syncer in background
 	go syncer.Run(ctx)

@@ -4,6 +4,7 @@ go 1.26.0
 
 require (
 	github.com/coder/websocket v1.8.15
+	github.com/hashicorp/yamux v0.1.2
 	github.com/prometheus/client_golang v1.22.0
 	golang.org/x/crypto v0.57.0
 )

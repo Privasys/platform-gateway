@@ -36,6 +36,12 @@ type Config struct {
 	ACMECacheDir  string // directory for issued certificates and the ACME account key
 	ACMEEmail     string // ACME account contact address (optional)
 	ACMEDirectory string // ACME directory URL; empty = Let's Encrypt production
+
+	// Tunnels accepts enclaves that dial OUT to the gateway (ALPN
+	// privasys-tunnel/1) and serves their "tunnel:<enclave_id>" routes over
+	// that connection. Requires terminate mode (the tunnel's TLS uses the
+	// public certificate).
+	Tunnels bool
 }
 
 // Load parses configuration from CLI flags with env var fallbacks.
@@ -58,6 +64,8 @@ func Load() (*Config, error) {
 	flag.StringVar(&cfg.ACMEEmail, "acme-email", envOr("GATEWAY_ACME_EMAIL", ""), "Contact address for the ACME account used for adopter hostnames")
 	flag.StringVar(&cfg.ACMEDirectory, "acme-directory", envOr("GATEWAY_ACME_DIRECTORY", ""), "ACME directory URL for adopter hostnames; empty uses Let's Encrypt production")
 
+	flag.BoolVar(&cfg.Tunnels, "tunnels", envOr("GATEWAY_TUNNELS", "") == "true", "Accept outbound tunnels from enclaves that take no inbound connections (requires -tls-cert)")
+
 	flag.Parse()
 
 	cfg.PollInterval = time.Duration(*pollSec) * time.Second
@@ -66,6 +74,9 @@ func Load() (*Config, error) {
 
 	if cfg.ManagementURL == "" {
 		return nil, fmt.Errorf("management-url is required (set -management-url or GATEWAY_MANAGEMENT_URL)")
+	}
+	if cfg.Tunnels && cfg.TLSCertPath == "" {
+		return nil, fmt.Errorf("tunnels require terminate mode (set -tls-cert and -tls-key)")
 	}
 	if (cfg.TLSCertPath == "") != (cfg.TLSKeyPath == "") {
 		return nil, fmt.Errorf("tls-cert and tls-key must both be set or both empty")

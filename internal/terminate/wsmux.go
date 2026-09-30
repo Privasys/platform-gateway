@@ -276,10 +276,10 @@ type muxKey struct {
 }
 
 type gwMuxPool struct {
-	upstream    string
-	sni         string
-	tlsCfg      *tls.Config
-	dialTimeout time.Duration
+	dialFn   func(ctx context.Context, upstream string) (net.Conn, error)
+	upstream string
+	sni      string
+	tlsCfg   *tls.Config
 
 	mu    sync.Mutex
 	conns []*gwMuxConn
@@ -307,9 +307,9 @@ func (h *Handler) muxPoolFor(route routetable.Route) *gwMuxPool {
 		policy = &PolicyDoc{}
 	}
 	p := &gwMuxPool{
-		upstream:    route.Upstream,
-		sni:         route.SNI,
-		dialTimeout: h.dialTimeout,
+		dialFn:   h.dialUpstream,
+		upstream: route.Upstream,
+		sni:      route.SNI,
 		tlsCfg: &tls.Config{
 			InsecureSkipVerify:    true, // RA-TLS verified in VerifyPeerCertificate
 			VerifyPeerCertificate: makeRATLSVerifier(h.caCertPool, h.insecureSkip, policy, route.SNI),
@@ -361,7 +361,7 @@ func (p *gwMuxPool) get() (*gwMuxConn, error) {
 // dial opens one mux connection: RA-TLS to the enclave, then the
 // privasys-mux/1 upgrade.
 func (p *gwMuxPool) dial() (*gwMuxConn, error) {
-	raw, err := net.DialTimeout("tcp", p.upstream, p.dialTimeout)
+	raw, err := p.dialFn(context.Background(), p.upstream)
 	if err != nil {
 		return nil, fmt.Errorf("wsmux dial: %w", err)
 	}

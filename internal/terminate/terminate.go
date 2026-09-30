@@ -105,6 +105,16 @@ type Handler struct {
 	// tracker holds the in-flight requests, tunnelled WebSockets and
 	// sealed mux streams per host, so a quarantine can cut them.
 	tracker *quarantine.Tracker
+
+	// dial opens connections to route upstreams.
+	dial DialFunc
+}
+
+// dialUpstream dials upstream within the handler's dial timeout.
+func (h *Handler) dialUpstream(ctx context.Context, upstream string) (net.Conn, error) {
+	ctx, cancel := context.WithTimeout(ctx, h.dialTimeout)
+	defer cancel()
+	return h.dial(ctx, upstream, "")
 }
 
 type upstreamProxy struct {
@@ -129,7 +139,14 @@ type Options struct {
 	// Tracker, when set, registers open traffic per host so a route
 	// turning quarantined cuts it. Nil tracks nothing.
 	Tracker *quarantine.Tracker
+	// Dial, when set, opens connections to route upstreams (for example
+	// tunnel streams for "tunnel:<enclave_id>" upstreams). Nil dials TCP.
+	Dial DialFunc
 }
+
+// DialFunc opens a connection to a route upstream. clientAddr is the
+// connecting client's address, informational only.
+type DialFunc func(ctx context.Context, upstream, clientAddr string) (net.Conn, error)
 
 // New creates a Handler. tlsConfig must be set up by the caller (typically
 // from a certloader.Loader's TLSConfig()).
@@ -148,6 +165,12 @@ func New(opts Options) *Handler {
 	}
 	if opts.IdleTimeout == 0 {
 		opts.IdleTimeout = 300 * time.Second
+	}
+	if opts.Dial == nil {
+		opts.Dial = func(ctx context.Context, upstream, _ string) (net.Conn, error) {
+			var d net.Dialer
+			return d.DialContext(ctx, "tcp", upstream)
+		}
 	}
 	origins := make(map[string]struct{}, len(opts.CORSOrigins))
 	var suffixes []string
@@ -174,6 +197,7 @@ func New(opts Options) *Handler {
 		muxPools:     make(map[string]*gwMuxPool),
 		lookup:       opts.Lookup,
 		tracker:      opts.Tracker,
+		dial:         opts.Dial,
 	}
 }
 
@@ -375,13 +399,23 @@ func (h *Handler) proxyFor(route routetable.Route) (*httputil.ReverseProxy, erro
 		return nil, fmt.Errorf("parse policy: %w", err)
 	}
 
-	target, err := url.Parse("https://" + route.Upstream)
+	// A tunnel upstream ("tunnel:<id>") is not a host:port; the transport
+	// dials route.Upstream itself, so the URL only needs a valid host.
+	targetHost := route.Upstream
+	if strings.HasPrefix(targetHost, "tunnel:") {
+		targetHost = upstreamName
+	}
+	target, err := url.Parse("https://" + targetHost)
 	if err != nil {
 		return nil, fmt.Errorf("parse upstream URL: %w", err)
 	}
 
 	transport := &http.Transport{
-		DialContext: (&net.Dialer{Timeout: h.dialTimeout}).DialContext,
+		// Every connection of this transport goes to this route's
+		// upstream, whatever address the URL resolves to.
+		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+			return h.dialUpstream(ctx, route.Upstream)
+		},
 		TLSClientConfig: &tls.Config{
 			// We deliberately use InsecureSkipVerify and validate the RA-TLS
 			// cert in VerifyPeerCertificate: the upstream cert is signed by

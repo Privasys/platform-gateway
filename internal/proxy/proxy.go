@@ -21,6 +21,7 @@ import (
 	"github.com/Privasys/platform-gateway/internal/quarantine"
 	"github.com/Privasys/platform-gateway/internal/routetable"
 	"github.com/Privasys/platform-gateway/internal/sni"
+	"github.com/Privasys/platform-gateway/internal/tunnel"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 )
@@ -73,6 +74,13 @@ type Gateway struct {
 	terminator  Terminator // optional, nil disables terminate mode
 	tracker     *quarantine.Tracker
 
+	// dial opens a connection to a route upstream. Defaults to TCP; with
+	// tunnels enabled it also serves "tunnel:<enclave_id>" upstreams.
+	dial DialFunc
+	// tunnels, when set, terminates enclaves dialing in with the
+	// privasys-tunnel/1 ALPN.
+	tunnels TunnelAcceptor
+
 	listener net.Listener
 	wg       sync.WaitGroup
 	closed   atomic.Bool
@@ -82,6 +90,25 @@ type Gateway struct {
 // can cut it. Call before Run.
 func (g *Gateway) SetTracker(t *quarantine.Tracker) {
 	g.tracker = t
+}
+
+// DialFunc opens a connection to a route upstream. clientAddr is passed on
+// to tunnelled enclaves for their logs.
+type DialFunc func(ctx context.Context, upstream, clientAddr string) (net.Conn, error)
+
+// SetDialer replaces the upstream dialer (TCP by default).
+func (g *Gateway) SetDialer(d DialFunc) {
+	g.dial = d
+}
+
+// TunnelAcceptor serves an enclave's outbound tunnel connection.
+type TunnelAcceptor interface {
+	Handle(conn net.Conn, clientHello []byte)
+}
+
+// SetTunnelAcceptor enables inbound enclave tunnels.
+func (g *Gateway) SetTunnelAcceptor(t TunnelAcceptor) {
+	g.tunnels = t
 }
 
 // Terminator handles the terminate-mode path for a single inbound
@@ -105,6 +132,10 @@ func New(table *routetable.Table, listenAddr string, dialTimeout, idleTimeout ti
 		bufferSize:  bufferSize,
 		fallbackTLS: tlsCfg,
 		terminator:  terminator,
+		dial: func(ctx context.Context, upstream, _ string) (net.Conn, error) {
+			var d net.Dialer
+			return d.DialContext(ctx, "tcp", upstream)
+		},
 	}
 }
 
@@ -239,6 +270,13 @@ func (g *Gateway) handleConn(clientConn net.Conn) {
 	// Clear the deadline
 	clientConn.SetReadDeadline(time.Time{})
 
+	// An enclave opening its outbound tunnel. Checked before the route
+	// lookup: the tunnel hostname is the gateway's own, not an app's.
+	if g.tunnels != nil && sni.HasALPN(alpns, tunnel.ALPN) {
+		g.tunnels.Handle(clientConn, buf[:n])
+		return
+	}
+
 	route, ok := g.table.Lookup(hostname)
 	if !ok {
 		connErrors.WithLabelValues("no_route").Inc()
@@ -283,7 +321,9 @@ func (g *Gateway) handleConn(clientConn net.Conn) {
 	}
 
 	// Splice mode (default): pure L4 SNI splice.
-	backendConn, err := net.DialTimeout("tcp", route.Upstream, g.dialTimeout)
+	dctx, dcancel := context.WithTimeout(context.Background(), g.dialTimeout)
+	backendConn, err := g.dial(dctx, route.Upstream, clientConn.RemoteAddr().String())
+	dcancel()
 	if err != nil {
 		connErrors.WithLabelValues("dial_upstream").Inc()
 		log.Printf("dial upstream %s for %q: %v", route.Upstream, hostname, err)
@@ -324,8 +364,8 @@ func (g *Gateway) splice(client, backend net.Conn) {
 	go func() {
 		n := g.copyWithIdleTimeout(backend, client)
 		bytesTransferred.WithLabelValues("client_to_backend").Add(float64(n))
-		if tc, ok := backend.(*net.TCPConn); ok {
-			tc.CloseWrite()
+		if cw, ok := backend.(closeWriter); ok {
+			cw.CloseWrite()
 		}
 		done <- struct{}{}
 	}()
@@ -334,8 +374,8 @@ func (g *Gateway) splice(client, backend net.Conn) {
 	go func() {
 		n := g.copyWithIdleTimeout(client, backend)
 		bytesTransferred.WithLabelValues("backend_to_client").Add(float64(n))
-		if tc, ok := client.(*net.TCPConn); ok {
-			tc.CloseWrite()
+		if cw, ok := client.(closeWriter); ok {
+			cw.CloseWrite()
 		}
 		done <- struct{}{}
 	}()
@@ -343,6 +383,12 @@ func (g *Gateway) splice(client, backend net.Conn) {
 	// Wait for both directions to finish
 	<-done
 	<-done
+}
+
+// closeWriter is a connection with TCP-style half-close: *net.TCPConn and
+// tunnel streams.
+type closeWriter interface {
+	CloseWrite() error
 }
 
 func (g *Gateway) copyWithIdleTimeout(dst, src net.Conn) int64 {
