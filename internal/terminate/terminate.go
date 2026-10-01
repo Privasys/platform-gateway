@@ -201,6 +201,39 @@ func New(opts Options) *Handler {
 	}
 }
 
+// Forget drops everything cached for a route the table retired: its reverse
+// proxy with its pooled connections, and its mux pool with every browser
+// socket riding it. Without this an app that is stopped, or an enclave that
+// moves address, leaves its entries behind for the life of the process,
+// since proxyFor and muxPoolFor only ever replace an entry of the same app.
+// Wire it to routetable.Table.OnRetired.
+func (h *Handler) Forget(route routetable.Route) {
+	proxyPrefix := route.Upstream + "|" + route.UpstreamName() + "|"
+	h.mu.Lock()
+	for k, p := range h.proxies {
+		if strings.HasPrefix(k, proxyPrefix) {
+			if p.cancel != nil {
+				p.cancel()
+			}
+			if tr, ok := p.rp.Transport.(interface{ CloseIdleConnections() }); ok {
+				tr.CloseIdleConnections()
+			}
+			delete(h.proxies, k)
+		}
+	}
+	h.mu.Unlock()
+
+	muxPrefix := route.Upstream + "|" + route.SNI + "|"
+	h.muxMu.Lock()
+	for k, p := range h.muxPools {
+		if strings.HasPrefix(k, muxPrefix) {
+			p.closeAll()
+			delete(h.muxPools, k)
+		}
+	}
+	h.muxMu.Unlock()
+}
+
 // Handle implements proxy.Terminator. clientHello is the buffered bytes
 // already consumed from clientConn during SNI extraction; they are replayed
 // into the TLS server before the handshake.

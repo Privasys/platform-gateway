@@ -103,7 +103,7 @@ func main() {
 		if resolver.ACMEEnabled() {
 			log.Printf("adopter hostnames enabled (acme cache=%s directory=%q)", cfg.ACMECacheDir, cfg.ACMEDirectory)
 		}
-		terminator = terminate.New(terminate.Options{
+		th := terminate.New(terminate.Options{
 			TLSConfig:    resolver.TLSConfig(),
 			DialTimeout:  cfg.DialTimeout,
 			IdleTimeout:  cfg.IdleTimeout,
@@ -114,6 +114,10 @@ func main() {
 			Tracker:      tracker,
 			Dial:         dialer.DialUpstream,
 		})
+		// A route that leaves the table or moves upstream takes its cached
+		// proxy and mux pool with it, instead of staying for the process life.
+		table.OnRetired(th.Forget)
+		terminator = th
 		if cfg.Tunnels {
 			tunnelAcceptor = tunnel.NewAcceptor(resolver.TLSConfig(),
 				tunnel.NewMgmtAuthorizer(cfg.ManagementURL, cfg.AuthToken), tunnels)

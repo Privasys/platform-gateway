@@ -233,3 +233,50 @@ func TestOnQuarantine(t *testing.T) {
 		t.Fatalf("fired = %v, want a single call", fired)
 	}
 }
+
+// TestOnRetired checks that the hook fires, after the swap, with the OLD
+// route of every host that left the table or moved upstream, and not for a
+// policy or state change, a new host or an unchanged one.
+func TestOnRetired(t *testing.T) {
+	table := New()
+	var fired []Route
+	table.OnRetired(func(old Route) {
+		if r, ok := table.Lookup(old.SNI); ok && r.Upstream == old.Upstream && r.UpstreamName() == old.UpstreamName() {
+			t.Errorf("hook for %q ran before the swap", old.SNI)
+		}
+		fired = append(fired, old)
+	})
+
+	table.Update([]Route{
+		{SNI: "gone.example.com", Upstream: "1"},
+		{SNI: "moved.example.com", Upstream: "2"},
+		{SNI: "alias.example.com", Upstream: "3", Canonical: "x.apps.example.com"},
+		{SNI: "policy.example.com", Upstream: "4"},
+		{SNI: "same.example.com", Upstream: "5"},
+	}, "v1")
+	table.Update([]Route{
+		{SNI: "moved.example.com", Upstream: "2b"},
+		{SNI: "alias.example.com", Upstream: "3", Canonical: "y.apps.example.com"},
+		{SNI: "policy.example.com", Upstream: "4", AttestationPolicy: []byte(`{}`), State: StateQuarantined},
+		{SNI: "same.example.com", Upstream: "5"},
+		{SNI: "new.example.com", Upstream: "6"},
+	}, "v2")
+
+	got := map[string]string{}
+	for _, r := range fired {
+		got[r.SNI] = r.Upstream + "|" + r.UpstreamName()
+	}
+	want := map[string]string{
+		"gone.example.com":  "1|gone.example.com",
+		"moved.example.com": "2|moved.example.com",
+		"alias.example.com": "3|x.apps.example.com",
+	}
+	if len(got) != len(want) {
+		t.Fatalf("fired = %v, want %v", got, want)
+	}
+	for sni, w := range want {
+		if got[sni] != w {
+			t.Errorf("fired[%q] = %q, want %q", sni, got[sni], w)
+		}
+	}
+}

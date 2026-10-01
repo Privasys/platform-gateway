@@ -55,6 +55,46 @@ func TestMuxPoolReplacedOnPolicyChange(t *testing.T) {
 	}
 }
 
+// A retired route (app stopped, enclave moved) takes its cache entries with
+// it; its neighbours on the same upstream keep theirs.
+func TestForgetDropsOnlyTheRetiredRoute(t *testing.T) {
+	h := New(Options{})
+	a := routetable.Route{SNI: "a.apps.privasys.org", Upstream: "10.0.0.1:443"}
+	b := routetable.Route{SNI: "b.apps.privasys.org", Upstream: "10.0.0.1:443"}
+
+	poolA := h.muxPoolFor(a)
+	client, server := net.Pipe()
+	defer server.Close()
+	connA := &gwMuxConn{conn: client, streams: map[muxKey]*gwStream{}, dead: make(chan struct{})}
+	poolA.conns = append(poolA.conns, connA)
+	poolB := h.muxPoolFor(b)
+	if _, err := h.proxyFor(a); err != nil {
+		t.Fatal(err)
+	}
+	rpB, err := h.proxyFor(b)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	h.Forget(a)
+
+	if !connA.isDead() {
+		t.Fatal("the retired route's mux connection was left open")
+	}
+	if len(h.muxPools) != 1 || len(h.proxies) != 1 {
+		t.Fatalf("%d pools and %d proxies cached, want 1 and 1", len(h.muxPools), len(h.proxies))
+	}
+	if h.muxPoolFor(b) != poolB {
+		t.Fatal("app B's pool was dropped with app A's route")
+	}
+	if again, _ := h.proxyFor(b); again != rpB {
+		t.Fatal("app B's proxy was dropped with app A's route")
+	}
+	if h.muxPoolFor(a) == poolA {
+		t.Fatal("app A's pool was not rebuilt after Forget")
+	}
+}
+
 func TestProxyCacheKeepsOtherAppsOnTheSameUpstream(t *testing.T) {
 	h := New(Options{})
 	a := routetable.Route{SNI: "a.apps.privasys.org", Upstream: "10.0.0.1:443"}

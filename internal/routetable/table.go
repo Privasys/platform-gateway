@@ -73,6 +73,7 @@ type Table struct {
 	quarantined atomic.Int64
 
 	onQuarantine atomic.Pointer[func(host string)]
+	onRetired    atomic.Pointer[func(old Route)]
 }
 
 // OnQuarantine sets fn to be called, after the new table is in place, for
@@ -81,6 +82,16 @@ type Table struct {
 // block for long: it runs on the updating goroutine.
 func (t *Table) OnQuarantine(fn func(host string)) {
 	t.onQuarantine.Store(&fn)
+}
+
+// OnRetired sets fn to be called, after the new table is in place, with
+// every route an Update retires: its host left the table, or it now points
+// at another upstream or upstream name. It lets the gateway drop whatever
+// it cached for the old route (pooled connections, verifiers). A policy
+// change alone retires nothing: the caches handle that lazily. fn must not
+// block for long: it runs on the updating goroutine.
+func (t *Table) OnRetired(fn func(old Route)) {
+	t.onRetired.Store(&fn)
 }
 
 // New creates an empty routing table.
@@ -152,6 +163,14 @@ func (t *Table) Update(routes []Route, version string) bool {
 			}
 			if old, ok := (*prev)[host]; ok && !old.Quarantined() {
 				(*fn)(host)
+			}
+		}
+	}
+	if fn := t.onRetired.Load(); fn != nil && *fn != nil {
+		for host, old := range *prev {
+			cur, ok := m[host]
+			if !ok || cur.Upstream != old.Upstream || cur.UpstreamName() != old.UpstreamName() {
+				(*fn)(old)
 			}
 		}
 	}
