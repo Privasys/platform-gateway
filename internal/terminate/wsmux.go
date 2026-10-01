@@ -286,18 +286,22 @@ type gwMuxPool struct {
 }
 
 // muxPoolFor returns the mux pool for a route, keyed like proxyFor so a
-// policy or SNI change builds a fresh pool with the new verifier.
+// policy change builds a fresh pool with the new verifier.
 func (h *Handler) muxPoolFor(route routetable.Route) *gwMuxPool {
 	policyHash := hashPolicy(route.AttestationPolicy)
-	key := route.Upstream + "|" + route.SNI + "|" + policyHash
+	app := route.Upstream + "|" + route.SNI + "|"
+	key := app + policyHash
 
 	h.muxMu.Lock()
 	defer h.muxMu.Unlock()
 	if p, ok := h.muxPools[key]; ok {
 		return p
 	}
+	// Only this app's pool under its previous policy is stale. A mutualised
+	// enclave serves many apps from one upstream: dropping their pools would
+	// close every browser socket riding them.
 	for k, p := range h.muxPools {
-		if strings.HasPrefix(k, route.Upstream+"|") {
+		if strings.HasPrefix(k, app) {
 			p.closeAll()
 			delete(h.muxPools, k)
 		}

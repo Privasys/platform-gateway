@@ -375,7 +375,8 @@ func (h *Handler) serveHTTP(tlsConn *tls.Conn, route routetable.Route, rp *httpu
 func (h *Handler) proxyFor(route routetable.Route) (*httputil.ReverseProxy, error) {
 	policyHash := hashPolicy(route.AttestationPolicy)
 	upstreamName := route.UpstreamName()
-	key := route.Upstream + "|" + upstreamName + "|" + policyHash
+	app := route.Upstream + "|" + upstreamName + "|"
+	key := app + policyHash
 
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -383,10 +384,10 @@ func (h *Handler) proxyFor(route routetable.Route) (*httputil.ReverseProxy, erro
 	if existing, ok := h.proxies[key]; ok {
 		return existing.rp, nil
 	}
-	// Drop any stale entry for the same upstream with a different
-	// policy or SNI.
+	// Drop this app's entry under its previous policy. Other apps on the
+	// same (mutualised) upstream keep theirs and their pooled connections.
 	for k, p := range h.proxies {
-		if strings.HasPrefix(k, route.Upstream+"|") {
+		if strings.HasPrefix(k, app) {
 			if p.cancel != nil {
 				p.cancel()
 			}
