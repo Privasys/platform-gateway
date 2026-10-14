@@ -388,6 +388,53 @@ func (h *Handler) serveHTTP(tlsConn *tls.Conn, route routetable.Route, rp *httpu
 	}
 }
 
+// publicTransportHeader is the enclave runtime's marker on a response it
+// served in the clear on a declared surface (static shell, public route).
+// Such a response is anonymous by construction on the enclave side; here it
+// means the runtime's CORS decision wins over the gateway's injection.
+const publicTransportHeader = "X-Privasys-Transport"
+
+func isPublicResponse(h http.Header) bool {
+	return h.Get(publicTransportHeader) == "public"
+}
+
+// reconcilePublicCORS merges the gateway's per-origin CORS injection (set on
+// the writer before the proxy ran) with the runtime's headers on a public
+// response: an open "*" from the runtime replaces the origin echo, and a
+// public response never allows credentials. Without the runtime's "*" the
+// gateway's echo stays (a static asset fetched from an allowed origin).
+func reconcilePublicCORS(h http.Header) {
+	if !isPublicResponse(h) {
+		return
+	}
+	h.Del("Access-Control-Allow-Credentials")
+	open := false
+	for _, v := range h.Values("Access-Control-Allow-Origin") {
+		if strings.TrimSpace(v) == "*" {
+			open = true
+		}
+	}
+	if open {
+		h.Set("Access-Control-Allow-Origin", "*")
+		h.Del("Vary")
+	}
+	if vs := h.Values("Access-Control-Expose-Headers"); len(vs) > 1 {
+		seen := map[string]bool{}
+		merged := make([]string, 0, 8)
+		for _, line := range vs {
+			for _, tok := range strings.Split(line, ",") {
+				t := strings.TrimSpace(tok)
+				if t == "" || seen[strings.ToLower(t)] {
+					continue
+				}
+				seen[strings.ToLower(t)] = true
+				merged = append(merged, t)
+			}
+		}
+		h.Set("Access-Control-Expose-Headers", strings.Join(merged, ", "))
+	}
+}
+
 // proxyFor returns the cached reverse proxy for this upstream, or builds
 // one on first use / when the policy or SNI changes.
 //
@@ -492,6 +539,15 @@ func (h *Handler) proxyFor(route routetable.Route) (*httputil.ReverseProxy, erro
 	// allowed". Strip the upstream copies so only the gateway's
 	// values survive.
 	rp.ModifyResponse = func(resp *http.Response) error {
+		// A response the enclave marked public was served in the clear on
+		// a surface the app declared (its static shell or a public route);
+		// the runtime owns its CORS there (an open "*" with no credentials,
+		// or nothing). Keep the runtime's headers; the writer reconciles
+		// them with the gateway's own injection (reconcilePublicCORS).
+		if isPublicResponse(resp.Header) {
+			resp.Header.Del("Access-Control-Allow-Credentials")
+			return nil
+		}
 		for _, h := range []string{
 			"Access-Control-Allow-Origin",
 			"Access-Control-Allow-Credentials",

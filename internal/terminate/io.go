@@ -89,6 +89,10 @@ func (w *connResponseWriter) WriteHeader(code int) {
 	}
 	w.wroteHeader = true
 	w.status = code
+	// A response the enclave served in the clear on a declared surface
+	// carries the runtime's CORS decision; the gateway's own injection
+	// (set before the proxy ran) must not stack on it or add credentials.
+	reconcilePublicCORS(w.header)
 
 	// Decide on transfer encoding. If Content-Length is set, use it.
 	// Otherwise fall back to chunked so we can stream SSE/long bodies.
