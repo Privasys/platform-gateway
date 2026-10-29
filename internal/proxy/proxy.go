@@ -298,13 +298,19 @@ func (g *Gateway) handleConn(clientConn net.Conn) {
 	// a name the enclave cannot serve; terminating also rewrites the Host
 	// to the canonical app hostname the enclave does know.
 	ratlsCapable := sni.HasALPN(alpns, "privasys-ratls/1")
-	if route.IsAlias() && g.terminator == nil {
+	// A direct adopter hostname: TLS ends in the enclave, which holds its
+	// own certificate for the name, so every connection is spliced and the
+	// terminator never sees it. While pending, only the ACME TLS-ALPN-01
+	// challenge goes through (the enclave is obtaining that certificate);
+	// the rest is still served as an alias.
+	direct := route.IsDirect() || (route.IsDirectPending() && isACMEChallengeOnly(alpns))
+	if !direct && route.IsAlias() && g.terminator == nil {
 		connErrors.WithLabelValues("alias_without_terminator").Inc()
 		log.Printf("no terminator for alias route %q from %s", hostname, clientConn.RemoteAddr())
 		g.send404(clientConn, buf[:n], hostname)
 		return
 	}
-	if (!ratlsCapable || route.IsAlias()) && g.terminator != nil {
+	if !direct && (!ratlsCapable || route.IsAlias()) && g.terminator != nil {
 		g.terminator.Handle(clientConn, buf[:n], route)
 		return
 	}
@@ -355,6 +361,12 @@ func (g *Gateway) handleConn(clientConn net.Conn) {
 
 	// Splice the two connections
 	g.splice(clientConn, backendConn)
+}
+
+// isACMEChallengeOnly reports a TLS-ALPN-01 validation handshake: the ACME
+// server offers the single protocol acme-tls/1 (RFC 8737 section 3).
+func isACMEChallengeOnly(alpns []string) bool {
+	return len(alpns) == 1 && alpns[0] == "acme-tls/1"
 }
 
 func (g *Gateway) splice(client, backend net.Conn) {

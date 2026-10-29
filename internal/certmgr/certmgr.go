@@ -95,6 +95,12 @@ func (r *Resolver) hostPolicy(_ context.Context, host string) error {
 	if !route.IsAlias() {
 		return fmt.Errorf("certmgr: %q is not an adopter hostname", host)
 	}
+	// A direct name's certificate belongs to the enclave, and its CAA
+	// record pins the enclave's ACME account: issuing here would compete
+	// with it, and would undo the point of the mode if it ever succeeded.
+	if route.IsDirect() || route.IsDirectPending() {
+		return fmt.Errorf("certmgr: %q is served by its enclave's own certificate", host)
+	}
 	return nil
 }
 

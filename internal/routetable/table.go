@@ -41,7 +41,28 @@ type Route struct {
 	// the attestation policy is checked against), so no attested leg ever
 	// learns the adopter's hostname and the enclave needs no route for it.
 	Canonical string `json:"canonical,omitempty"`
+	// Mode is set on an adopter hostname whose TLS ends in the enclave
+	// rather than here. ModeDirect: every connection is spliced, whatever
+	// its ALPN, and the enclave presents its own certificate for the name.
+	// ModeDirectPending: only the ACME TLS-ALPN-01 challenge (ALPN exactly
+	// acme-tls/1) is spliced, so the enclave can obtain that certificate;
+	// everything else is still terminated as an alias. Empty: an alias, or
+	// a platform route. The gateway never issues for a direct or pending
+	// name.
+	Mode string `json:"mode,omitempty"`
 }
+
+// Route modes for adopter hostnames (see Route.Mode).
+const (
+	ModeDirect        = "direct"
+	ModeDirectPending = "direct-pending"
+)
+
+// IsDirect reports whether every connection on this route is spliced.
+func (r Route) IsDirect() bool { return r.Mode == ModeDirect }
+
+// IsDirectPending reports whether only the ACME challenge is spliced.
+func (r Route) IsDirectPending() bool { return r.Mode == ModeDirectPending }
 
 // IsAlias reports whether this route is an adopter hostname standing in for
 // a platform app hostname.
@@ -86,7 +107,7 @@ func (t *Table) OnQuarantine(fn func(host string)) {
 
 // OnRetired sets fn to be called, after the new table is in place, with
 // every route an Update retires: its host left the table, or it now points
-// at another upstream or upstream name. It lets the gateway drop whatever
+// at another upstream, upstream name or mode. It lets the gateway drop whatever
 // it cached for the old route (pooled connections, verifiers). A policy
 // change alone retires nothing: the caches handle that lazily. fn must not
 // block for long: it runs on the updating goroutine.
@@ -169,7 +190,7 @@ func (t *Table) Update(routes []Route, version string) bool {
 	if fn := t.onRetired.Load(); fn != nil && *fn != nil {
 		for host, old := range *prev {
 			cur, ok := m[host]
-			if !ok || cur.Upstream != old.Upstream || cur.UpstreamName() != old.UpstreamName() {
+			if !ok || cur.Upstream != old.Upstream || cur.UpstreamName() != old.UpstreamName() || cur.Mode != old.Mode {
 				(*fn)(old)
 			}
 		}

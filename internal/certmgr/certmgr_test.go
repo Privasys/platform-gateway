@@ -149,3 +149,26 @@ func TestChallengeDetection(t *testing.T) {
 		t.Error("ordinary browser protocols must not be treated as a challenge")
 	}
 }
+
+// A direct or pending name's certificate belongs to its enclave: the gateway
+// never issues for it, even though it is an adopter hostname.
+func TestHostPolicyRefusesDirectNames(t *testing.T) {
+	certPath, keyPath := writeWildcard(t)
+	loader, err := certloader.New(certPath, keyPath)
+	if err != nil {
+		t.Fatalf("certloader: %v", err)
+	}
+	routes := map[string]routetable.Route{
+		"direct.example.com":  {SNI: "direct.example.com", Canonical: "a.apps.privasys.org", Mode: routetable.ModeDirect},
+		"pending.example.com": {SNI: "pending.example.com", Canonical: "a.apps.privasys.org", Mode: routetable.ModeDirectPending},
+	}
+	r, err := New(Options{Wildcard: loader, CacheDir: t.TempDir(), Lookup: testLookup(routes)})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	for host := range routes {
+		if err := r.hostPolicy(context.Background(), host); err == nil {
+			t.Errorf("%s: issuance allowed for a name the enclave certifies", host)
+		}
+	}
+}
