@@ -76,7 +76,7 @@ func TestDirectSplicesEveryALPN(t *testing.T) {
 }
 
 // While pending, only the TLS-ALPN-01 challenge is spliced; everything else
-// is still an alias, terminated here.
+// is refused (""): the gateway holds no certificate for an adopter name.
 func TestDirectPendingSplicesOnlyTheACMEChallenge(t *testing.T) {
 	g, got, term := directGateway(t, routetable.ModeDirectPending)
 	cases := []struct {
@@ -84,10 +84,10 @@ func TestDirectPendingSplicesOnlyTheACMEChallenge(t *testing.T) {
 		want  string
 	}{
 		{[]string{"acme-tls/1"}, "splice"},
-		{[]string{"acme-tls/1", "h2"}, "terminate"},
-		{[]string{"h2", "http/1.1"}, "terminate"},
-		{nil, "terminate"},
-		{[]string{"privasys-ratls/1"}, "terminate"},
+		{[]string{"acme-tls/1", "h2"}, ""},
+		{[]string{"h2", "http/1.1"}, ""},
+		{nil, ""},
+		{[]string{"privasys-ratls/1"}, ""},
 	}
 	for _, c := range cases {
 		handshakeWith(g, c.alpns)

@@ -86,22 +86,15 @@ func main() {
 				log.Fatalf("upstream-ca: no certificates parsed from %s", cfg.UpstreamCA)
 			}
 		}
-		// Certificate resolution per ClientHello: the platform wildcard for
-		// our own hostnames, and Let's Encrypt per adopter hostname when a
-		// cache directory is configured. Issuance is gated on the route
-		// table, so only a published alias can trigger it.
-		resolver, err := certmgr.New(certmgr.Options{
-			Wildcard:     loader,
-			CacheDir:     cfg.ACMECacheDir,
-			Email:        cfg.ACMEEmail,
-			DirectoryURL: cfg.ACMEDirectory,
-			Lookup:       table.Lookup,
-		})
+		// Certificate resolution per ClientHello: the platform wildcard only.
+		// An adopter hostname is spliced to its enclave, which holds its own
+		// certificate; the gateway never issues for one.
+		resolver, err := certmgr.New(certmgr.Options{Wildcard: loader})
 		if err != nil {
 			log.Fatalf("certmgr: %v", err)
 		}
-		if resolver.ACMEEnabled() {
-			log.Printf("adopter hostnames enabled (acme cache=%s directory=%q)", cfg.ACMECacheDir, cfg.ACMEDirectory)
+		if cfg.ACMECacheDir != "" {
+			log.Printf("ignoring -acme-cache %s: adopter hostnames are served by their enclave (direct mode), the gateway no longer issues for them", cfg.ACMECacheDir)
 		}
 		th := terminate.New(terminate.Options{
 			TLSConfig:    resolver.TLSConfig(),

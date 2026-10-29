@@ -300,25 +300,21 @@ func (g *Gateway) handleConn(clientConn net.Conn) {
 	//   - Everything else (browsers, curl) gets terminate when configured,
 	//     so they see the LE wildcard cert and the gateway opens an internal
 	//     RA-TLS connection to the enclave on their behalf.
-	// An ALIAS route (an adopter's own hostname in front of an app) is
-	// browser-facing only and always terminates here. The enclave has no
-	// route for that hostname, so a splice would hand the client a cert for
-	// a name the enclave cannot serve; terminating also rewrites the Host
-	// to the canonical app hostname the enclave does know.
 	ratlsCapable := sni.HasALPN(alpns, "privasys-ratls/1")
-	// A direct adopter hostname: TLS ends in the enclave, which holds its
-	// own certificate for the name, so every connection is spliced and the
-	// terminator never sees it. While pending, only the ACME TLS-ALPN-01
-	// challenge goes through (the enclave is obtaining that certificate);
-	// the rest is still served as an alias.
+	// An adopter hostname is served in direct mode only: TLS ends in the
+	// enclave, which holds its own certificate for the name, so every
+	// connection is spliced and the terminator never sees it. While the
+	// enclave is still obtaining that certificate (pending), only the ACME
+	// TLS-ALPN-01 challenge goes through, and anything else is refused: the
+	// gateway holds no certificate for the name and never terminates it.
 	direct := route.IsDirect() || (route.IsDirectPending() && isACMEChallengeOnly(alpns))
-	if !direct && route.IsAlias() && g.terminator == nil {
-		connErrors.WithLabelValues("alias_without_terminator").Inc()
-		log.Printf("no terminator for alias route %q from %s", hostname, clientConn.RemoteAddr())
+	if !direct && route.IsAlias() {
+		connErrors.WithLabelValues("adopter_not_direct").Inc()
+		log.Printf("refused %q from %s: adopter hostname not served directly yet", hostname, clientConn.RemoteAddr())
 		g.send404(clientConn, buf[:n], hostname)
 		return
 	}
-	if !direct && (!ratlsCapable || route.IsAlias()) && g.terminator != nil {
+	if !direct && !ratlsCapable && g.terminator != nil {
 		g.terminator.Handle(clientConn, buf[:n], route)
 		return
 	}
