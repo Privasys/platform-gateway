@@ -131,6 +131,7 @@ func main() {
 	// L4 gateway
 	gw := proxy.New(table, cfg.ListenAddr, cfg.DialTimeout, cfg.IdleTimeout, cfg.BufferSize, terminator)
 	gw.SetTracker(tracker)
+	gw.SetDirectProxyProtocol(cfg.DirectProxyProtocol)
 	gw.SetDialer(dialer.DialUpstream)
 	if tunnelAcceptor != nil {
 		gw.SetTunnelAcceptor(tunnelAcceptor)
