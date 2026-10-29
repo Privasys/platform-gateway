@@ -113,3 +113,57 @@ func TestDirectRefusesQuarantinedRoute(t *testing.T) {
 		t.Fatalf("quarantined direct route went to %q, want refused", p)
 	}
 }
+
+// tcpHandshake runs one client handshake on directTestHost over a real TCP
+// connection (net.Pipe has no addresses, so it never carries a PROXY header).
+func tcpHandshake(t *testing.T, g *Gateway) {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer ln.Close()
+	go func() {
+		c, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		g.wg.Add(1)
+		g.handleConn(c)
+	}()
+	raw, err := net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	tc := tls.Client(raw, &tls.Config{ServerName: directTestHost, NextProtos: []string{"h2"}, InsecureSkipVerify: true})
+	defer tc.Close()
+	tc.SetDeadline(time.Now().Add(2 * time.Second))
+	_ = tc.Handshake()
+}
+
+// The PROXY header goes only to a direct route that asks for it: the control
+// plane sets the flag once the enclave trusts this gateway for it, so an
+// enclave that does not expect a header (an older runtime, the WASM runtime)
+// never receives one.
+func TestDirectProxyHeaderOnlyWhenTheRouteAsks(t *testing.T) {
+	for _, want := range []bool{false, true} {
+		upstream, got := fakeEnclave(t)
+		table := routetable.New()
+		table.Update([]routetable.Route{{
+			SNI: directTestHost, Upstream: upstream, Canonical: "app.apps.privasys.org",
+			Mode: routetable.ModeDirect, ProxyProtocol: want,
+		}}, "v1")
+		g := New(table, "", time.Second, time.Second, 32768, &recordingTerminator{calls: make(chan string, 4)})
+		tcpHandshake(t, g)
+		var first []byte
+		select {
+		case first = <-got:
+		case <-time.After(3 * time.Second):
+			t.Fatalf("proxy_protocol=%v: nothing reached the enclave", want)
+		}
+		isProxy := len(first) == 5 && string(first) == string(proxyV2Signature[:5])
+		if isProxy != want {
+			t.Errorf("proxy_protocol=%v: first bytes %x, header sent=%v", want, first, isProxy)
+		}
+	}
+}

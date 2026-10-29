@@ -26,7 +26,7 @@ Two further paths:
 
 ### PROXY protocol on direct splices
 
-With `-direct-proxy-protocol`, the gateway writes a PROXY protocol v2 header carrying the real client address before the client's bytes, on direct splices only, so the enclave can rate-limit per client. It is off by default. Enable it only once every enclave runtime behind the gateway is configured to accept the header from the gateway's address: a runtime that does not expect it fails the TLS handshake on every direct name. The header is never sent through an egress tunnel.
+On a direct route that carries `proxy_protocol: true`, the gateway writes a PROXY protocol v2 header with the real client address before the client's bytes, so the enclave can rate-limit per client. The control plane sets that flag per route, and only after the route's enclave confirmed it trusts the gateways' addresses for the header, so an enclave that does not expect one never receives one. Nothing is configured on the gateway. The header is never sent through an egress tunnel. The old global `-direct-proxy-protocol` flag is accepted and ignored.
 
 ### Architecture
 
@@ -65,8 +65,9 @@ The gateway polls the control plane's `GET /api/v1/internal/routes` (`-poll-inte
 | `state` | `quarantined`, or absent (active). |
 | `canonical` | On an adopter hostname: the app's platform hostname. |
 | `mode` | On an adopter hostname: `direct` or `direct-pending`. |
+| `proxy_protocol` | On a direct route: send a PROXY protocol v2 header (see above). |
 
-A change of upstream, canonical name or mode retires the route: its cached proxy and connection pools are dropped.
+A change of upstream, canonical name, mode or `proxy_protocol` retires the route: its cached proxy and connection pools are dropped.
 
 ### Route States
 
@@ -107,7 +108,7 @@ Each refusal is logged and counted in `gateway_quarantine_refusals_total`, and e
 | `-upstream-ca` | `GATEWAY_UPSTREAM_CA` | none | Optional CA bundle for the enclaves' RA-TLS chains on the terminate path |
 | `-cors-origins` | `GATEWAY_CORS_ORIGINS` | none | Allowed CORS origins for terminate-mode routes (exact origins or `*.suffix`) |
 | `-tunnels` | `GATEWAY_TUNNELS` | off | Accept egress tunnels from enclaves (requires `-tls-cert`) |
-| `-direct-proxy-protocol` | `GATEWAY_DIRECT_PROXY_PROTOCOL` | off | Send a PROXY protocol v2 header on direct splices (see above) |
+| `-direct-proxy-protocol` | `GATEWAY_DIRECT_PROXY_PROTOCOL` | | Ignored: the header is decided per route (see above) |
 | `-acme-cache`, `-acme-email`, `-acme-directory` | `GATEWAY_ACME_*` | none | Ignored. They configured per-host certificates for adopter hostnames, which the gateway no longer obtains; `-acme-cache` logs a line at start-up. |
 
 ## Build

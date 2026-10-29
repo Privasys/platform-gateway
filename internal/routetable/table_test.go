@@ -280,3 +280,18 @@ func TestOnRetired(t *testing.T) {
 		}
 	}
 }
+
+// A PROXY-protocol change retires the route, so cached connections built for
+// the old setting are dropped.
+func TestProxyProtocolChangeRetiresTheRoute(t *testing.T) {
+	table := New()
+	var retired []Route
+	table.OnRetired(func(old Route) { retired = append(retired, old) })
+	r := Route{SNI: "app.adopter.example", Upstream: "10.0.0.1:443", Canonical: "app.apps.privasys.org", Mode: ModeDirect}
+	table.Update([]Route{r}, "v1")
+	r.ProxyProtocol = true
+	table.Update([]Route{r}, "v2")
+	if len(retired) != 1 || retired[0].ProxyProtocol {
+		t.Fatalf("retired = %+v, want the old route without proxy_protocol", retired)
+	}
+}

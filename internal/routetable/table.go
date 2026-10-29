@@ -47,6 +47,12 @@ type Route struct {
 	// a platform route. The gateway never issues for a direct or pending
 	// name.
 	Mode string `json:"mode,omitempty"`
+	// ProxyProtocol asks for a PROXY protocol v2 header ahead of a direct
+	// splice, so the enclave learns the client address. The control plane
+	// sets it only after the enclave confirmed it trusts this gateway's
+	// address for the header, so an enclave that does not expect one never
+	// gets one.
+	ProxyProtocol bool `json:"proxy_protocol,omitempty"`
 }
 
 // Route modes for adopter hostnames (see Route.Mode).
@@ -187,7 +193,7 @@ func (t *Table) Update(routes []Route, version string) bool {
 	if fn := t.onRetired.Load(); fn != nil && *fn != nil {
 		for host, old := range *prev {
 			cur, ok := m[host]
-			if !ok || cur.Upstream != old.Upstream || cur.UpstreamName() != old.UpstreamName() || cur.Mode != old.Mode {
+			if !ok || cur.Upstream != old.Upstream || cur.UpstreamName() != old.UpstreamName() || cur.Mode != old.Mode || cur.ProxyProtocol != old.ProxyProtocol {
 				(*fn)(old)
 			}
 		}

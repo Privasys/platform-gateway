@@ -27,7 +27,7 @@ type Config struct {
 	TLSCertPath string // path to wildcard cert PEM (e.g. /etc/privasys/tls/wildcard.crt)
 	TLSKeyPath  string // path to wildcard cert key PEM
 	UpstreamCA  string // optional CA bundle to validate enclave RA-TLS chains; empty enforces only OID policy
-	DirectProxyProtocol bool // send a PROXY v2 header on direct splices (the runtime must accept it first)
+	DirectProxyProtocol bool // ignored: the PROXY v2 header is decided per route (Route.ProxyProtocol)
 	CORSOrigins string // comma-separated list of allowed CORS origins for terminate-mode routes; empty disables CORS
 
 	// Adopter hostnames (alias routes). When ACMECacheDir is set, the
@@ -60,7 +60,7 @@ func Load() (*Config, error) {
 	flag.StringVar(&cfg.TLSCertPath, "tls-cert", envOr("GATEWAY_TLS_CERT", ""), "Path to public TLS wildcard certificate PEM (enables terminate mode)")
 	flag.StringVar(&cfg.TLSKeyPath, "tls-key", envOr("GATEWAY_TLS_KEY", ""), "Path to public TLS wildcard certificate key PEM")
 	flag.StringVar(&cfg.UpstreamCA, "upstream-ca", envOr("GATEWAY_UPSTREAM_CA", ""), "Optional CA bundle to validate enclave RA-TLS chains in terminate mode")
-	flag.BoolVar(&cfg.DirectProxyProtocol, "direct-proxy-protocol", envOr("GATEWAY_DIRECT_PROXY_PROTOCOL", "") == "true", "Send a PROXY protocol v2 header with the client address on direct splices. Enable only once every enclave runtime behind this gateway accepts it.")
+	flag.BoolVar(&cfg.DirectProxyProtocol, "direct-proxy-protocol", envOr("GATEWAY_DIRECT_PROXY_PROTOCOL", "") == "true", "Ignored. The PROXY protocol v2 header is sent per route, on direct routes whose enclave confirmed it expects one.")
 	flag.StringVar(&cfg.CORSOrigins, "cors-origins", envOr("GATEWAY_CORS_ORIGINS", ""), "Comma-separated list of allowed CORS origins for terminate-mode routes. Supports exact origins (https://chat.privasys.org) and wildcard suffixes (*.privasys.org or https://*.privasys.org). Empty disables CORS.")
 	flag.StringVar(&cfg.ACMECacheDir, "acme-cache", envOr("GATEWAY_ACME_CACHE", ""), "Ignored: the gateway no longer obtains certificates for adopter hostnames (they are served in direct mode by their enclave)")
 	flag.StringVar(&cfg.ACMEEmail, "acme-email", envOr("GATEWAY_ACME_EMAIL", ""), "Ignored (see -acme-cache)")

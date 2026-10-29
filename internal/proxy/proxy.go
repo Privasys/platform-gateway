@@ -74,8 +74,6 @@ type Gateway struct {
 	fallbackTLS *tls.Config
 	terminator  Terminator // optional, nil disables terminate mode
 	tracker     *quarantine.Tracker
-	// directProxy sends a PROXY v2 header on direct splices (proxyproto.go).
-	directProxy bool
 
 	// dial opens a connection to a route upstream. Defaults to TCP; with
 	// tunnels enabled it also serves "tunnel:<enclave_id>" upstreams.
@@ -91,11 +89,6 @@ type Gateway struct {
 
 // SetTracker registers every spliced connection with t so a quarantine
 // can cut it. Call before Run.
-// SetDirectProxyProtocol turns on the PROXY v2 header on direct splices.
-// Off by default: an enclave runtime that does not expect it would read the
-// header as the start of the TLS handshake and fail every direct name.
-func (g *Gateway) SetDirectProxyProtocol(on bool) { g.directProxy = on }
-
 func (g *Gateway) SetTracker(t *quarantine.Tracker) {
 	g.tracker = t
 }
@@ -358,11 +351,13 @@ func (g *Gateway) handleConn(clientConn net.Conn) {
 	}
 
 	// A direct splice to an enclave address tells the enclave who the client
-	// is (PROXY protocol v2): its TLS ends there, so it cannot learn it from
-	// a header we add. Never over an egress tunnel, whose connections reach
+	// is (PROXY protocol v2) when its route asks for it: its TLS ends there,
+	// so it cannot learn it from a header we add. The route flag is set by the
+	// control plane only once that enclave trusts the header from us. Never
+	// over an egress tunnel, whose connections reach
 	// the enclave's TLS listener from inside the enclave, where no address
 	// list could vouch for a header.
-	if direct && g.directProxy && !strings.HasPrefix(route.Upstream, "tunnel:") {
+	if direct && route.ProxyProtocol && !strings.HasPrefix(route.Upstream, "tunnel:") {
 		// Without TCP addresses (an in-memory connection) there is no client
 		// address to give, so no header.
 		if hdr, err := proxyV2Header(clientConn.RemoteAddr(), clientConn.LocalAddr()); err == nil {
