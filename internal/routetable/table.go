@@ -34,12 +34,9 @@ type Route struct {
 	Upstream          string          `json:"upstream"`
 	AttestationPolicy json.RawMessage `json:"attestation_policy,omitempty"`
 	State             string          `json:"state,omitempty"`
-	// Canonical is set on an ALIAS route: an adopter's own hostname
-	// standing in front of an app whose platform hostname is Canonical.
-	// The browser sees SNI; everything upstream keeps the canonical name
-	// (the SNI presented to the enclave, the Host header, the certificate
-	// the attestation policy is checked against), so no attested leg ever
-	// learns the adopter's hostname and the enclave needs no route for it.
+	// Canonical is set on an adopter hostname: the platform hostname of the
+	// app it serves. An adopter hostname is only ever spliced (Mode below);
+	// a route with Canonical but no direct Mode is refused.
 	Canonical string `json:"canonical,omitempty"`
 	// Mode is set on an adopter hostname whose TLS ends in the enclave
 	// rather than here. ModeDirect: every connection is spliced, whatever

@@ -62,9 +62,9 @@ func Load() (*Config, error) {
 	flag.StringVar(&cfg.UpstreamCA, "upstream-ca", envOr("GATEWAY_UPSTREAM_CA", ""), "Optional CA bundle to validate enclave RA-TLS chains in terminate mode")
 	flag.BoolVar(&cfg.DirectProxyProtocol, "direct-proxy-protocol", envOr("GATEWAY_DIRECT_PROXY_PROTOCOL", "") == "true", "Send a PROXY protocol v2 header with the client address on direct splices. Enable only once every enclave runtime behind this gateway accepts it.")
 	flag.StringVar(&cfg.CORSOrigins, "cors-origins", envOr("GATEWAY_CORS_ORIGINS", ""), "Comma-separated list of allowed CORS origins for terminate-mode routes. Supports exact origins (https://chat.privasys.org) and wildcard suffixes (*.privasys.org or https://*.privasys.org). Empty disables CORS.")
-	flag.StringVar(&cfg.ACMECacheDir, "acme-cache", envOr("GATEWAY_ACME_CACHE", ""), "Directory for certificates issued for adopter hostnames and the ACME account key. Empty disables per-host issuance.")
-	flag.StringVar(&cfg.ACMEEmail, "acme-email", envOr("GATEWAY_ACME_EMAIL", ""), "Contact address for the ACME account used for adopter hostnames")
-	flag.StringVar(&cfg.ACMEDirectory, "acme-directory", envOr("GATEWAY_ACME_DIRECTORY", ""), "ACME directory URL for adopter hostnames; empty uses Let's Encrypt production")
+	flag.StringVar(&cfg.ACMECacheDir, "acme-cache", envOr("GATEWAY_ACME_CACHE", ""), "Ignored: the gateway no longer obtains certificates for adopter hostnames (they are served in direct mode by their enclave)")
+	flag.StringVar(&cfg.ACMEEmail, "acme-email", envOr("GATEWAY_ACME_EMAIL", ""), "Ignored (see -acme-cache)")
+	flag.StringVar(&cfg.ACMEDirectory, "acme-directory", envOr("GATEWAY_ACME_DIRECTORY", ""), "Ignored (see -acme-cache)")
 
 	flag.BoolVar(&cfg.Tunnels, "tunnels", envOr("GATEWAY_TUNNELS", "") == "true", "Accept outbound tunnels from enclaves that take no inbound connections (requires -tls-cert)")
 
