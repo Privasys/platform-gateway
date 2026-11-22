@@ -178,10 +178,9 @@ func (h *Handler) serveSealedWSMux(w *connResponseWriter, req *http.Request, rou
 		return
 	}
 
-	host := req.Host
-	if host == "" {
-		host = route.SNI
-	}
+	// The enclave picks the app by the stream open's host: always the name
+	// the route pins upstream, as the HTTP path does, never the client's Host.
+	host := route.UpstreamName()
 	uri := req.URL.RequestURI()
 
 	browser, err := websocket.Accept(w, req, &websocket.AcceptOptions{

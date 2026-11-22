@@ -48,6 +48,11 @@ func selfSignedTLS(t *testing.T, cn string) tls.Certificate {
 // muxStatus != 101 refuses the mux upgrade with that status instead, and any
 // non-mux request gets a fixed 418 (to make v1 passthrough observable).
 func fakeEnclave(t *testing.T, muxStatus int) (addr string, opens *atomic.Int32) {
+	return fakeEnclaveWith(t, muxStatus, nil)
+}
+
+// fakeEnclaveWith is fakeEnclave reporting the host of every stream open.
+func fakeEnclaveWith(t *testing.T, muxStatus int, onOpen func(host string)) (addr string, opens *atomic.Int32) {
 	t.Helper()
 	cert := selfSignedTLS(t, "enclave.test")
 	ln, err := tls.Listen("tcp", "127.0.0.1:0", &tls.Config{Certificates: []tls.Certificate{cert}})
@@ -106,9 +111,12 @@ func fakeEnclave(t *testing.T, muxStatus int) (addr string, opens *atomic.Int32)
 					case muxTypeOpen:
 						opens.Add(1)
 						// Echo the sealed open envelope back as the "ack".
-						_, _, env, perr := parseTestOpen(payload)
+						host, _, env, perr := parseTestOpen(payload)
 						if perr != nil {
 							return
+						}
+						if onOpen != nil {
+							onOpen(host)
 						}
 						write(muxTypeData, sid, stream, env)
 					case muxTypeData:
@@ -349,5 +357,42 @@ func TestMuxFrameBounds(t *testing.T) {
 	c := &gwMuxConn{conn: a, bw: bufio.NewWriter(a), dead: make(chan struct{})}
 	if err := c.writeFrame(muxTypeData, strings.Repeat("s", 256), 1, nil); err == nil {
 		t.Fatal("a session id over 255 bytes must not be written")
+	}
+}
+
+// TestWSMuxOpenCarriesRouteName proves the stream open names the app the
+// route pins upstream, whatever Host the browser request carried.
+func TestWSMuxOpenCarriesRouteName(t *testing.T) {
+	hosts := make(chan string, 1)
+	enclaveAddr, _ := fakeEnclaveWith(t, http.StatusSwitchingProtocols, func(h string) { hosts <- h })
+	gwCert := selfSignedTLS(t, "app.test")
+	h := New(Options{
+		TLSConfig:    &tls.Config{Certificates: []tls.Certificate{gwCert}},
+		InsecureSkip: true,
+	})
+	route := routetable.Route{SNI: "app.test", Upstream: enclaveAddr}
+	gwAddr := startGateway(t, h, route)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	// The TLS leg names app.test; the request's Host names another app.
+	ws, _, err := websocket.Dial(ctx, "wss://other-app.test/live", &websocket.DialOptions{
+		HTTPClient:   wsClient(t, gwAddr, "app.test"),
+		Subprotocols: []string{sealedWSSubprotocol, "session-abc", "00000000000000aa"},
+	})
+	if err != nil {
+		t.Fatalf("browser dial: %v", err)
+	}
+	defer ws.CloseNow()
+	if err := ws.Write(ctx, websocket.MessageBinary, []byte("open")); err != nil {
+		t.Fatalf("send open: %v", err)
+	}
+	select {
+	case got := <-hosts:
+		if got != "app.test" {
+			t.Fatalf("stream open host = %q, want the route's app.test", got)
+		}
+	case <-ctx.Done():
+		t.Fatal("no stream open reached the enclave")
 	}
 }
