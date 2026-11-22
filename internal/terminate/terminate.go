@@ -97,6 +97,9 @@ type Handler struct {
 	// "." + suffix. Scheme is not constrained at the suffix level
 	// (browsers only send Origin for http/https anyway).
 	corsSuffixes []string
+	// Domains whose subdomains are tenant apps (lower-case, no leading
+	// dot); a wildcard suffix never reaches across one (underAppDomain).
+	appDomains []string
 
 	// One reverse proxy per upstream so connections are pooled. The
 	// transport is reset whenever the route's policy changes.
@@ -141,6 +144,11 @@ type Options struct {
 	CACertPool   *x509.CertPool // pool used to validate upstream RA-TLS certs (the enclave's intermediary CA chain)
 	InsecureSkip bool           // dev/test only: skip RA-TLS chain validation, only enforce expected-OID policy
 	CORSOrigins  []string       // allowed CORS origins; empty disables CORS injection (enclave is expected to handle it)
+	// AppDomains are domains whose subdomains are tenant apps (for example
+	// apps.privasys.org). A wildcard CORS entry never matches an origin
+	// under one unless the entry itself is at or under that domain. Labels
+	// "apps" and "apps-*" are recognised without configuration.
+	AppDomains []string
 	// Lookup, when set, is consulted before every request on a
 	// terminated connection (typically routetable.Table.Lookup) so a
 	// route quarantined after the connection was opened is refused
@@ -195,7 +203,16 @@ func New(opts Options) *Handler {
 		}
 		origins[o] = struct{}{}
 	}
+	var appDomains []string
+	for _, d := range opts.AppDomains {
+		d = strings.ToLower(strings.Trim(strings.TrimSpace(d), "."))
+		d = strings.TrimPrefix(d, "*.")
+		if d != "" {
+			appDomains = append(appDomains, d)
+		}
+	}
 	return &Handler{
+		appDomains:   appDomains,
 		tlsConfig:    opts.TLSConfig,
 		dialTimeout:  opts.DialTimeout,
 		idleTimeout:  opts.IdleTimeout,
@@ -789,7 +806,38 @@ func (h *Handler) isAllowedOrigin(origin string) bool {
 		return false
 	}
 	for _, suf := range h.corsSuffixes {
-		if host == suf || strings.HasSuffix(host, "."+suf) {
+		if host == suf {
+			return true
+		}
+		if strings.HasSuffix(host, "."+suf) && !h.underAppDomain(host, suf) {
+			return true
+		}
+	}
+	return false
+}
+
+// underAppDomain reports whether host is a tenant app's origin that the
+// wildcard suffix suf only reaches by spanning an app domain: a suffix entry
+// such as "*.privasys.org" is meant for the platform's own sites, never for
+// every app under "*.apps.privasys.org". Apps are recognised two ways:
+//
+//   - a configured app domain (Options.AppDomains) lies between host and suf;
+//   - by convention, a label between host's leftmost label and suf is "apps"
+//     or starts with "apps-" (apps.privasys.org, apps-test.privasys.org,
+//     apps.test.privasys.org).
+//
+// A suffix entry at or under the app domain itself ("*.apps.privasys.org")
+// still matches its apps, and exact entries are never affected.
+func (h *Handler) underAppDomain(host, suf string) bool {
+	for _, d := range h.appDomains {
+		if strings.HasSuffix(host, "."+d) && d != suf && strings.HasSuffix(d, "."+suf) {
+			return true
+		}
+	}
+	rest := strings.TrimSuffix(host, "."+suf)
+	labels := strings.Split(rest, ".")
+	for _, l := range labels[1:] {
+		if l == "apps" || strings.HasPrefix(l, "apps-") {
 			return true
 		}
 	}

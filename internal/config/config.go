@@ -24,11 +24,12 @@ type Config struct {
 	// does NOT advertise the `privasys-ratls/1` ALPN, using the loaded
 	// wildcard cert (LE-issued). RA-TLS-aware clients always splice.
 	// Empty = terminate mode disabled (gateway is splice-only).
-	TLSCertPath string // path to wildcard cert PEM (e.g. /etc/privasys/tls/wildcard.crt)
-	TLSKeyPath  string // path to wildcard cert key PEM
-	UpstreamCA  string // optional CA bundle to validate enclave RA-TLS chains; empty enforces only OID policy
-	DirectProxyProtocol bool // ignored: the PROXY v2 header is decided per route (Route.ProxyProtocol)
-	CORSOrigins string // comma-separated list of allowed CORS origins for terminate-mode routes; empty disables CORS
+	TLSCertPath         string // path to wildcard cert PEM (e.g. /etc/privasys/tls/wildcard.crt)
+	TLSKeyPath          string // path to wildcard cert key PEM
+	UpstreamCA          string // optional CA bundle to validate enclave RA-TLS chains; empty enforces only OID policy
+	DirectProxyProtocol bool   // ignored: the PROXY v2 header is decided per route (Route.ProxyProtocol)
+	CORSOrigins         string // comma-separated list of allowed CORS origins for terminate-mode routes; empty disables CORS
+	AppDomains          string // comma-separated domains whose subdomains are tenant apps; wildcard CORS entries never reach across them
 
 	// Adopter hostnames (alias routes). When ACMECacheDir is set, the
 	// gateway obtains a Let's Encrypt certificate per published alias over
@@ -62,6 +63,7 @@ func Load() (*Config, error) {
 	flag.StringVar(&cfg.UpstreamCA, "upstream-ca", envOr("GATEWAY_UPSTREAM_CA", ""), "Optional CA bundle to validate enclave RA-TLS chains in terminate mode")
 	flag.BoolVar(&cfg.DirectProxyProtocol, "direct-proxy-protocol", envOr("GATEWAY_DIRECT_PROXY_PROTOCOL", "") == "true", "Ignored. The PROXY protocol v2 header is sent per route, on direct routes whose enclave confirmed it expects one.")
 	flag.StringVar(&cfg.CORSOrigins, "cors-origins", envOr("GATEWAY_CORS_ORIGINS", ""), "Comma-separated list of allowed CORS origins for terminate-mode routes. Supports exact origins (https://chat.privasys.org) and wildcard suffixes (*.privasys.org or https://*.privasys.org). Empty disables CORS.")
+	flag.StringVar(&cfg.AppDomains, "app-domains", envOr("GATEWAY_APP_DOMAINS", ""), "Comma-separated domains whose subdomains are tenant apps (e.g. apps.privasys.org). A wildcard CORS origin never matches an app under one; labels \"apps\" and \"apps-*\" are recognised without this.")
 	flag.StringVar(&cfg.ACMECacheDir, "acme-cache", envOr("GATEWAY_ACME_CACHE", ""), "Ignored: the gateway no longer obtains certificates for adopter hostnames (they are served in direct mode by their enclave)")
 	flag.StringVar(&cfg.ACMEEmail, "acme-email", envOr("GATEWAY_ACME_EMAIL", ""), "Ignored (see -acme-cache)")
 	flag.StringVar(&cfg.ACMEDirectory, "acme-directory", envOr("GATEWAY_ACME_DIRECTORY", ""), "Ignored (see -acme-cache)")

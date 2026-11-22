@@ -103,6 +103,7 @@ func main() {
 			CACertPool:   caPool,
 			InsecureSkip: caPool == nil, // no CA pool ⇒ rely on OID policy only
 			CORSOrigins:  splitAndTrim(cfg.CORSOrigins),
+			AppDomains:   splitAndTrim(cfg.AppDomains),
 			Lookup:       table.Lookup,
 			Tracker:      tracker,
 			Dial:         dialer.DialUpstream,

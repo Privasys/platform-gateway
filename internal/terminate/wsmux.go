@@ -173,7 +173,8 @@ func (h *Handler) serveSealedWSMux(w *connResponseWriter, req *http.Request, rou
 	// instead of the library's same-origin default. Sealed transport does
 	// not rest on this — no ambient credentials cross this leg — it only
 	// keeps arbitrary web pages from holding gateway resources.
-	if origin := req.Header.Get("Origin"); origin != "" && !h.isAllowedOrigin(origin) {
+	// The app's own pages (same origin as the route) are always allowed.
+	if origin := req.Header.Get("Origin"); origin != "" && !h.isAllowedOrigin(origin) && !strings.EqualFold(originHost(origin), route.SNI) {
 		writeStatus(w.conn, http.StatusForbidden, "origin not allowed")
 		return
 	}

@@ -106,7 +106,8 @@ Each refusal is logged and counted in `gateway_quarantine_refusals_total`, and e
 | `-buffer-size` | `GATEWAY_BUFFER_SIZE` | `32768` | Splice buffer size in bytes |
 | `-tls-cert`, `-tls-key` | `GATEWAY_TLS_CERT`, `GATEWAY_TLS_KEY` | none | Platform certificate and key; enable terminate mode (reloaded on SIGHUP) |
 | `-upstream-ca` | `GATEWAY_UPSTREAM_CA` | none | Optional CA bundle for the enclaves' RA-TLS chains on the terminate path |
-| `-cors-origins` | `GATEWAY_CORS_ORIGINS` | none | Allowed CORS origins for terminate-mode routes (exact origins or `*.suffix`) |
+| `-cors-origins` | `GATEWAY_CORS_ORIGINS` | none | Allowed CORS origins for terminate-mode routes (exact origins or `*.suffix`). A `*.suffix` entry never matches a tenant app under an app domain (see `-app-domains`); list such an origin exactly, or as `*.apps.<domain>` |
+| `-app-domains` | `GATEWAY_APP_DOMAINS` | none | Domains whose subdomains are tenant apps. Labels `apps` and `apps-*` below a wildcard entry are recognised without it |
 | `-tunnels` | `GATEWAY_TUNNELS` | off | Accept egress tunnels from enclaves (requires `-tls-cert`) |
 | `-direct-proxy-protocol` | `GATEWAY_DIRECT_PROXY_PROTOCOL` | | Ignored: the header is decided per route (see above) |
 | `-acme-cache`, `-acme-email`, `-acme-directory` | `GATEWAY_ACME_*` | none | Ignored. They configured per-host certificates for adopter hostnames, which the gateway no longer obtains; `-acme-cache` logs a line at start-up. |
