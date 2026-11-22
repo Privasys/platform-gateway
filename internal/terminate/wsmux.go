@@ -81,6 +81,9 @@ const (
 	// gwMuxOpenTimeout bounds the wait for the SDK's sealed stream open
 	// (its first binary message after the browser upgrade).
 	gwMuxOpenTimeout = 10 * time.Second
+	// muxMaxSIDLen mirrors the enclave's bound on a session id; the frame
+	// header carries the length in one byte.
+	muxMaxSIDLen = 64
 )
 
 var (
@@ -120,6 +123,9 @@ func parseSealedWS(req *http.Request) *sealedWSParams {
 	if len(tokens) < 3 || tokens[0] != sealedWSSubprotocol {
 		return nil
 	}
+	if !validSessionID(tokens[1]) {
+		return nil
+	}
 	hex := strings.ToLower(tokens[2])
 	if len(hex) != 16 {
 		return nil
@@ -129,6 +135,23 @@ func parseSealedWS(req *http.Request) *sealedWSParams {
 		return nil
 	}
 	return &sealedWSParams{sessionID: tokens[1], streamID: id, streamHex: hex}
+}
+
+// validSessionID reports whether sid has the shape of a session id the
+// enclave issues: a non-empty base64url string of at most muxMaxSIDLen bytes.
+func validSessionID(sid string) bool {
+	if sid == "" || len(sid) > muxMaxSIDLen {
+		return false
+	}
+	for i := 0; i < len(sid); i++ {
+		c := sid[i]
+		switch {
+		case c >= 'A' && c <= 'Z', c >= 'a' && c <= 'z', c >= '0' && c <= '9', c == '-', c == '_':
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // serveSealedWSMux terminates a sealed WebSocket at the gateway and relays
@@ -212,7 +235,13 @@ func (h *Handler) serveSealedWSMux(w *connResponseWriter, req *http.Request, rou
 		return
 	}
 
-	if err := mc.writeFrame(muxTypeOpen, p.sessionID, p.streamID, encodeMuxOpen(host, uri, openEnv)); err != nil {
+	openPayload, err := encodeMuxOpen(host, uri, openEnv)
+	if err != nil {
+		browser.Close(websocket.StatusPolicyViolation, "request target too long")
+		muxStreamsTotal.WithLabelValues("open_too_long").Inc()
+		return
+	}
+	if err := mc.writeFrame(muxTypeOpen, p.sessionID, p.streamID, openPayload); err != nil {
 		browser.Close(websocket.StatusBadGateway, "enclave mux unavailable")
 		muxStreamsTotal.WithLabelValues("open_write_error").Inc()
 		return
@@ -582,6 +611,9 @@ func (c *gwMuxConn) writeFrame(typ byte, sid string, stream uint64, payload []by
 	if c.isDead() {
 		return errors.New("wsmux: connection dead")
 	}
+	if len(sid) > 0xFF {
+		return errors.New("wsmux: session id too long")
+	}
 	var hdr [14]byte
 	hdr[0] = typ
 	hdr[1] = byte(len(sid))
@@ -609,7 +641,10 @@ func (c *gwMuxConn) writeFrame(typ byte, sid string, stream uint64, payload []by
 // frame codec (mirrors the enclave's mux.go)
 // -----------------------------------------------------------------------------
 
-func encodeMuxOpen(host, path string, openEnv []byte) []byte {
+func encodeMuxOpen(host, path string, openEnv []byte) ([]byte, error) {
+	if len(host) > 0xFFFF || len(path) > 0xFFFF {
+		return nil, errors.New("wsmux: host or path too long")
+	}
 	out := make([]byte, 2+len(host)+2+len(path)+len(openEnv))
 	binary.BigEndian.PutUint16(out[:2], uint16(len(host)))
 	copy(out[2:], host)
@@ -617,7 +652,7 @@ func encodeMuxOpen(host, path string, openEnv []byte) []byte {
 	binary.BigEndian.PutUint16(out[off:off+2], uint16(len(path)))
 	copy(out[off+2:], path)
 	copy(out[off+2+len(path):], openEnv)
-	return out
+	return out, nil
 }
 
 func encodeMuxClose(code websocket.StatusCode, reason string) []byte {

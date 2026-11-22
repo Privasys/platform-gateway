@@ -307,3 +307,47 @@ func TestParseSealedWS(t *testing.T) {
 	}
 	_ = strings.TrimSpace("")
 }
+
+func TestParseSealedWSRefusesBadSessionID(t *testing.T) {
+	mk := func(sid string) *http.Request {
+		req, _ := http.NewRequest(http.MethodGet, "https://app.test/live", nil)
+		req.Header.Set("Upgrade", "websocket")
+		req.Header.Set("Sec-WebSocket-Protocol", "privasys.sealed.v1, "+sid+", 00000000000000ff")
+		return req
+	}
+	if p := parseSealedWS(mk(strings.Repeat("A", muxMaxSIDLen))); p == nil {
+		t.Fatal("a session id at the length bound must parse")
+	}
+	if p := parseSealedWS(mk("Ab0_-x")); p == nil {
+		t.Fatal("a base64url session id must parse")
+	}
+	for name, sid := range map[string]string{
+		"too long":  strings.Repeat("A", muxMaxSIDLen+1),
+		"very long": strings.Repeat("A", 300),
+		"bad char":  "abc.def",
+		"slash":     "abc/def",
+	} {
+		if p := parseSealedWS(mk(sid)); p != nil {
+			t.Fatalf("%s: expected nil, got %+v", name, p)
+		}
+	}
+}
+
+func TestMuxFrameBounds(t *testing.T) {
+	if _, err := encodeMuxOpen(strings.Repeat("h", 0x10000), "/", nil); err == nil {
+		t.Fatal("an over-long host must be refused")
+	}
+	if _, err := encodeMuxOpen("app.test", strings.Repeat("p", 0x10000), nil); err == nil {
+		t.Fatal("an over-long path must be refused")
+	}
+	if _, err := encodeMuxOpen("app.test", "/live", []byte("env")); err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+	a, b := net.Pipe()
+	defer a.Close()
+	defer b.Close()
+	c := &gwMuxConn{conn: a, bw: bufio.NewWriter(a), dead: make(chan struct{})}
+	if err := c.writeFrame(muxTypeData, strings.Repeat("s", 256), 1, nil); err == nil {
+		t.Fatal("a session id over 255 bytes must not be written")
+	}
+}
