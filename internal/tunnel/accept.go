@@ -45,6 +45,8 @@ type Acceptor struct {
 	tlsConfig *tls.Config
 	auth      Authorizer
 	registry  *Registry
+	// attempts bounds, per source, the tunnel opens passed to auth.
+	attempts *sourceBuckets
 }
 
 // NewAcceptor builds an Acceptor. base supplies the gateway's public
@@ -54,7 +56,12 @@ func NewAcceptor(base *tls.Config, auth Authorizer, registry *Registry) *Accepto
 	cfg := base.Clone()
 	cfg.NextProtos = []string{ALPN}
 	cfg.MinVersion = tls.VersionTLS13
-	return &Acceptor{tlsConfig: cfg, auth: auth, registry: registry}
+	return &Acceptor{
+		tlsConfig: cfg,
+		auth:      auth,
+		registry:  registry,
+		attempts:  newSourceBuckets(authorizeRatePerMinute, authorizeBurst),
+	}
 }
 
 // Handle serves one enclave tunnel connection until it ends. clientHello is
@@ -96,6 +103,15 @@ func (a *Acceptor) Handle(conn net.Conn, clientHello []byte) {
 		return
 	}
 
+	// Each source may pass a few opens a minute to the control plane; an
+	// open it authorizes gives its token back, so only refusals count.
+	source := sourceKey(remote)
+	if !a.attempts.take(source) {
+		sessionsTotal.WithLabelValues("rate_limited").Inc()
+		writeStatus(tlsConn, http.StatusTooManyRequests, "too many tunnel attempts")
+		return
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), handshakeTimeout)
 	enclaveID, err := a.auth.Authorize(ctx, AuthRequest{
 		Method:     req.Method,
@@ -111,6 +127,7 @@ func (a *Acceptor) Handle(conn net.Conn, clientHello []byte) {
 		writeStatus(tlsConn, http.StatusForbidden, "tunnel not authorized")
 		return
 	}
+	a.attempts.give(source)
 
 	if _, err := io.WriteString(tlsConn, "HTTP/1.1 101 Switching Protocols\r\n"+
 		"Upgrade: "+UpgradeProtocol+"\r\nConnection: Upgrade\r\n\r\n"); err != nil {
