@@ -18,6 +18,8 @@ import (
 const (
 	handshakeTimeout = 10 * time.Second
 	maxRequestBody   = 16 << 10
+	// maxRequestHead bounds the request line and headers of a tunnel open.
+	maxRequestHead = 1 << 20
 )
 
 // AuthRequest is what the gateway forwards to the authorizer: the exact
@@ -71,7 +73,10 @@ func (a *Acceptor) Handle(conn net.Conn, clientHello []byte) {
 		return
 	}
 
-	br := bufio.NewReader(tlsConn)
+	// The handshake deadline still bounds the time; this bounds the bytes
+	// (http.ReadRequest has no header limit of its own). Bytes past the
+	// limit stay unread on tlsConn for the yamux session.
+	br := bufio.NewReader(io.LimitReader(tlsConn, maxRequestHead+maxRequestBody))
 	req, err := http.ReadRequest(br)
 	if err != nil {
 		sessionsTotal.WithLabelValues("bad_request").Inc()

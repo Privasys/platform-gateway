@@ -29,6 +29,7 @@ import (
 	"crypto/x509"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -65,6 +66,15 @@ var (
 // (RFC 8737). Kept as a literal so this package does not depend on the ACME
 // client; certmgr owns issuance.
 const acmeALPNProto = "acme-tls/1"
+
+const (
+	// maxRequestHeaderBytes bounds one request's line and headers.
+	maxRequestHeaderBytes = 1 << 20
+	// requestHeaderTimeout bounds reading one request's line and headers
+	// once its first byte has arrived (the idle timeout covers the wait
+	// for that byte).
+	requestHeaderTimeout = 30 * time.Second
+)
 
 // PolicyDoc is the on-the-wire shape of attestation_policy.
 type PolicyDoc struct {
@@ -280,13 +290,28 @@ func (h *Handler) Handle(clientConn net.Conn, clientHello []byte, route routetab
 // serveHTTP reads HTTP/1.1 requests off the terminated TLS conn and forwards
 // each through the reverse proxy until the client hangs up.
 func (h *Handler) serveHTTP(tlsConn *tls.Conn, route routetable.Route, rp *httputil.ReverseProxy) {
-	br := bufio.NewReader(tlsConn)
+	lr := &headerLimitReader{r: tlsConn}
+	br := bufio.NewReader(lr)
 	for {
+		// Wait up to the idle timeout for the next request to start, then
+		// give its line and headers a bounded time and size.
+		lr.limit(maxRequestHeaderBytes)
 		tlsConn.SetReadDeadline(time.Now().Add(h.idleTimeout))
+		if _, err := br.Peek(1); err != nil {
+			if err != io.EOF && !isClosedConn(err) {
+				log.Printf("terminate: read request from client for %q: %v", route.SNI, err)
+			}
+			return
+		}
+		tlsConn.SetReadDeadline(time.Now().Add(requestHeaderTimeout))
 		req, err := http.ReadRequest(br)
+		lr.unlimit()
 		if err != nil {
 			if err != io.EOF && !isClosedConn(err) {
 				log.Printf("terminate: read request from client for %q: %v", route.SNI, err)
+			}
+			if errors.Is(err, errHeaderTooLarge) {
+				writeStatus(tlsConn, http.StatusRequestHeaderFieldsTooLarge, "request headers too large")
 			}
 			return
 		}

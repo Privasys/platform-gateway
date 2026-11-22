@@ -2,7 +2,9 @@ package terminate
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"strconv"
@@ -150,4 +152,44 @@ func (w *connResponseWriter) flushClose(req *http.Request) {
 	}
 	_ = w.bw.Flush()
 	w.conn.SetWriteDeadline(time.Time{})
+}
+
+// errHeaderTooLarge ends a request whose line and headers exceed the budget.
+var errHeaderTooLarge = errors.New("request line and headers too large")
+
+// headerLimitReader caps the bytes read while a request line and headers are
+// being parsed. http.ReadRequest has no bound of its own (net/http's
+// MaxHeaderBytes belongs to http.Server), so the budget is set before each
+// request and lifted once its headers are read: the body, a hijacked
+// WebSocket and the sealed mux stream read through it unbounded.
+type headerLimitReader struct {
+	r         io.Reader
+	limited   bool
+	remaining int64
+}
+
+// limit starts a fresh budget of n bytes.
+func (l *headerLimitReader) limit(n int64) {
+	l.limited = true
+	l.remaining = n
+}
+
+// unlimit lifts the budget.
+func (l *headerLimitReader) unlimit() {
+	l.limited = false
+}
+
+func (l *headerLimitReader) Read(p []byte) (int, error) {
+	if !l.limited {
+		return l.r.Read(p)
+	}
+	if l.remaining <= 0 {
+		return 0, errHeaderTooLarge
+	}
+	if int64(len(p)) > l.remaining {
+		p = p[:l.remaining]
+	}
+	n, err := l.r.Read(p)
+	l.remaining -= int64(n)
+	return n, err
 }
