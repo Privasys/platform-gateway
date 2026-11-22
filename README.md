@@ -103,7 +103,9 @@ Each refusal is logged and counted in `gateway_quarantine_refusals_total`, and e
 | `-poll-interval` | `GATEWAY_POLL_INTERVAL` | `5` (s) | Route sync polling interval |
 | `-dial-timeout` | `GATEWAY_DIAL_TIMEOUT` | `2` (s) | Timeout for connecting to an upstream |
 | `-idle-timeout` | `GATEWAY_IDLE_TIMEOUT` | `300` (s) | Close connections idle longer than this |
-| `-buffer-size` | `GATEWAY_BUFFER_SIZE` | `32768` | Splice buffer size in bytes |
+| `-buffer-size` | `GATEWAY_BUFFER_SIZE` | `32768` | Largest ClientHello read, in bytes |
+| `-max-conns` | `GATEWAY_MAX_CONNS` | `20000` | Concurrent client connections in total; more are closed on accept (`0` disables) |
+| `-max-conns-per-ip` | `GATEWAY_MAX_CONNS_PER_IP` | `256` | Concurrent client connections per source IPv4 address or IPv6 /64 (`0` disables) |
 | `-tls-cert`, `-tls-key` | `GATEWAY_TLS_CERT`, `GATEWAY_TLS_KEY` | none | Platform certificate and key; enable terminate mode (reloaded on SIGHUP) |
 | `-upstream-ca` | `GATEWAY_UPSTREAM_CA` | none | Optional CA bundle for the enclaves' RA-TLS chains on the terminate path |
 | `-cors-origins` | `GATEWAY_CORS_ORIGINS` | none | Allowed CORS origins for terminate-mode routes (exact origins or `*.suffix`). A `*.suffix` entry never matches a tenant app under an app domain (see `-app-domains`); list such an origin exactly, or as `*.apps.<domain>` |

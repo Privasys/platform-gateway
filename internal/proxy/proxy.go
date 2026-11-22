@@ -82,6 +82,9 @@ type Gateway struct {
 	// privasys-tunnel/1 ALPN.
 	tunnels TunnelAcceptor
 
+	// limiter caps concurrent connections in total and per source.
+	limiter *connLimiter
+
 	listener net.Listener
 	wg       sync.WaitGroup
 	closed   atomic.Bool
@@ -100,6 +103,14 @@ type DialFunc func(ctx context.Context, upstream, clientAddr string) (net.Conn, 
 // SetDialer replaces the upstream dialer (TCP by default).
 func (g *Gateway) SetDialer(d DialFunc) {
 	g.dial = d
+}
+
+// SetConnLimits caps concurrent connections: max in total and perIP from one
+// source (an IPv4 address or an IPv6 /64). A connection over either cap is
+// closed on accept. Zero or negative disables that cap. Call before Run;
+// the defaults are DefaultMaxConns and DefaultMaxConnsPerIP.
+func (g *Gateway) SetConnLimits(max, perIP int) {
+	g.limiter = newConnLimiter(max, perIP)
 }
 
 // TunnelAcceptor serves an enclave's outbound tunnel connection.
@@ -133,6 +144,7 @@ func New(table *routetable.Table, listenAddr string, dialTimeout, idleTimeout ti
 		bufferSize:  bufferSize,
 		fallbackTLS: tlsCfg,
 		terminator:  terminator,
+		limiter:     newConnLimiter(DefaultMaxConns, DefaultMaxConnsPerIP),
 		dial: func(ctx context.Context, upstream, _ string) (net.Conn, error) {
 			var d net.Dialer
 			return d.DialContext(ctx, "tcp", upstream)
@@ -222,8 +234,17 @@ func (g *Gateway) Run(ctx context.Context) error {
 			return err
 		}
 		connTotal.Inc()
+		release, reason, ok := g.limiter.acquire(conn.RemoteAddr())
+		if !ok {
+			connErrors.WithLabelValues(reason).Inc()
+			conn.Close()
+			continue
+		}
 		g.wg.Add(1)
-		go g.handleConn(conn)
+		go func() {
+			defer release()
+			g.handleConn(conn)
+		}()
 	}
 
 	g.wg.Wait()
@@ -241,7 +262,9 @@ func (g *Gateway) handleConn(clientConn net.Conn) {
 	// make ~1.7KB hellos routine) arrives split across TCP segments, so a
 	// single Read often returns a truncated record. Keep reading until the
 	// hello parses, the buffer fills, or the deadline expires.
-	buf := make([]byte, g.bufferSize)
+	// The buffer starts small and grows up to bufferSize only while a hello
+	// is still arriving, so a connection that sends little holds little.
+	buf := make([]byte, min(initialHelloBuffer, g.bufferSize))
 
 	// Deadline covers the whole ClientHello (5 seconds to send it)
 	clientConn.SetReadDeadline(time.Now().Add(5 * time.Second))
@@ -261,8 +284,15 @@ func (g *Gateway) handleConn(clientConn net.Conn) {
 		if err == nil {
 			break
 		}
-		if errors.Is(err, sni.ErrTruncated) && n < len(buf) {
-			continue
+		if errors.Is(err, sni.ErrTruncated) {
+			if n == len(buf) && len(buf) < g.bufferSize {
+				grown := make([]byte, min(2*len(buf), g.bufferSize))
+				copy(grown, buf[:n])
+				buf = grown
+			}
+			if n < len(buf) {
+				continue
+			}
 		}
 		connErrors.WithLabelValues("sni_parse").Inc()
 		log.Printf("SNI parse error from %s: %v", clientConn.RemoteAddr(), err)
@@ -419,12 +449,40 @@ type closeWriter interface {
 	CloseWrite() error
 }
 
+const (
+	// initialHelloBuffer is the ClientHello buffer a connection starts with.
+	initialHelloBuffer = 4096
+	// smallCopyBuffer serves a splice direction until a read fills it; only
+	// then does it take a full copyBufferSize buffer from the pool, so the
+	// many quiet directions (a client waiting on a response, a WebSocket at
+	// rest) hold a small buffer.
+	smallCopyBuffer = 2048
+	copyBufferSize  = 32 * 1024
+)
+
+var copyBufPool = sync.Pool{New: func() any {
+	b := make([]byte, copyBufferSize)
+	return &b
+}}
+
 func (g *Gateway) copyWithIdleTimeout(dst, src net.Conn) int64 {
-	buf := make([]byte, 32*1024)
+	buf := make([]byte, smallCopyBuffer)
+	var pooled *[]byte
+	defer func() {
+		if pooled != nil {
+			copyBufPool.Put(pooled)
+		}
+	}()
 	var total int64
 	for {
 		src.SetReadDeadline(time.Now().Add(g.idleTimeout))
 		nr, rerr := src.Read(buf)
+		if nr == len(buf) && pooled == nil {
+			// A full read: this direction is carrying bulk data. Copy out
+			// what was read, then switch to a full-size buffer.
+			pooled = copyBufPool.Get().(*[]byte)
+			buf = append((*pooled)[:0], buf[:nr]...)[:copyBufferSize]
+		}
 		if nr > 0 {
 			nw, werr := dst.Write(buf[:nr])
 			total += int64(nw)

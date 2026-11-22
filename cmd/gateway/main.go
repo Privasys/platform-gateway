@@ -125,6 +125,7 @@ func main() {
 	// L4 gateway
 	gw := proxy.New(table, cfg.ListenAddr, cfg.DialTimeout, cfg.IdleTimeout, cfg.BufferSize, terminator)
 	gw.SetTracker(tracker)
+	gw.SetConnLimits(cfg.MaxConns, cfg.MaxConnsPerIP)
 	if cfg.DirectProxyProtocol {
 		log.Printf("ignoring -direct-proxy-protocol: the PROXY header is now sent per route, on the routes whose enclave has confirmed it expects one")
 	}

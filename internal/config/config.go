@@ -18,6 +18,8 @@ type Config struct {
 	DialTimeout   time.Duration // Timeout for connecting to upstream backends
 	IdleTimeout   time.Duration // Close idle upstream connections after this duration
 	BufferSize    int           // Read buffer size in bytes
+	MaxConns      int           // Concurrent client connections in total; 0 disables the cap
+	MaxConnsPerIP int           // Concurrent client connections per source IPv4 address or IPv6 /64; 0 disables the cap
 
 	// Terminate-mode (session-relay) options. When TLSCertPath is set,
 	// the gateway will terminate inbound TLS for any connection that
@@ -58,6 +60,8 @@ func Load() (*Config, error) {
 	dialSec := flag.Int("dial-timeout", envOrInt("GATEWAY_DIAL_TIMEOUT", 2), "Upstream dial timeout in seconds")
 	idleSec := flag.Int("idle-timeout", envOrInt("GATEWAY_IDLE_TIMEOUT", 300), "Idle connection timeout in seconds")
 	flag.IntVar(&cfg.BufferSize, "buffer-size", envOrInt("GATEWAY_BUFFER_SIZE", 32768), "Read buffer size in bytes")
+	flag.IntVar(&cfg.MaxConns, "max-conns", envOrInt("GATEWAY_MAX_CONNS", 20000), "Concurrent client connections in total; more are closed on accept (0 disables)")
+	flag.IntVar(&cfg.MaxConnsPerIP, "max-conns-per-ip", envOrInt("GATEWAY_MAX_CONNS_PER_IP", 256), "Concurrent client connections per source IPv4 address or IPv6 /64; more are closed on accept (0 disables)")
 	flag.StringVar(&cfg.TLSCertPath, "tls-cert", envOr("GATEWAY_TLS_CERT", ""), "Path to public TLS wildcard certificate PEM (enables terminate mode)")
 	flag.StringVar(&cfg.TLSKeyPath, "tls-key", envOr("GATEWAY_TLS_KEY", ""), "Path to public TLS wildcard certificate key PEM")
 	flag.StringVar(&cfg.UpstreamCA, "upstream-ca", envOr("GATEWAY_UPSTREAM_CA", ""), "Optional CA bundle to validate enclave RA-TLS chains in terminate mode")
