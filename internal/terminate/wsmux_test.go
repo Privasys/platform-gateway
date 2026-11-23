@@ -503,9 +503,10 @@ func TestBrowserBudgetPerSource(t *testing.T) {
 // its reservation: the socket is closed once it falls behind the minimum rate and
 // the bytes are released.
 func TestHalfSentMessageIsCut(t *testing.T) {
-	oldGrace, oldRate := gwBrowserMessageGrace, gwBrowserMinRate
-	gwBrowserMessageGrace, gwBrowserMinRate = 300*time.Millisecond, 1<<30
-	defer func() { gwBrowserMessageGrace, gwBrowserMinRate = oldGrace, oldRate }()
+	oldGrace, oldRate := gwBrowserMessageGrace.Load(), gwBrowserMinRate.Load()
+	gwBrowserMessageGrace.Store(int64(300 * time.Millisecond))
+	gwBrowserMinRate.Store(1 << 30)
+	defer func() { gwBrowserMessageGrace.Store(oldGrace); gwBrowserMinRate.Store(oldRate) }()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()

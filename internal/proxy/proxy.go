@@ -247,8 +247,29 @@ func (g *Gateway) Run(ctx context.Context) error {
 		}()
 	}
 
-	g.wg.Wait()
+	g.waitDrained()
 	return nil
+}
+
+// drainTimeout bounds how long a stopping gateway waits for open connections.
+// Spliced connections, WebSockets and tunnels can live for hours, so waiting
+// for all of them would keep the port closed until the service manager kills
+// the process; clients reconnect to the new process instead. A variable for
+// tests.
+var drainTimeout = 3 * time.Second
+
+// waitDrained waits for open connections to finish, at most drainTimeout.
+func (g *Gateway) waitDrained() {
+	done := make(chan struct{})
+	go func() {
+		g.wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(drainTimeout):
+		log.Printf("gateway: stopping with connections still open after %s", drainTimeout)
+	}
 }
 
 func (g *Gateway) handleConn(clientConn net.Conn) {
@@ -528,10 +549,13 @@ func ActiveConnections() float64 {
 	return 0 // Use prometheus directly for actual value
 }
 
-// Drain stops accepting new connections but waits for existing ones to finish.
+// Drain stops accepting new connections and waits for existing ones to
+// finish, at most drainTimeout.
 func (g *Gateway) Drain() {
+	// Marked first, so Run reads the closed listener as a stop, not an error.
+	g.closed.Store(true)
 	if g.listener != nil {
 		g.listener.Close()
 	}
-	g.wg.Wait()
+	g.waitDrained()
 }

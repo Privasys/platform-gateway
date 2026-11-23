@@ -539,9 +539,14 @@ func (st *gwStream) markAnswered() {
 // reserved; holding the budget now takes real upload bandwidth. Variables
 // for tests.
 var (
-	gwBrowserMessageGrace       = 10 * time.Second
-	gwBrowserMinRate      int64 = 256 << 10
+	gwBrowserMessageGrace atomic.Int64 // nanoseconds
+	gwBrowserMinRate      atomic.Int64 // bytes per second
 )
+
+func init() {
+	gwBrowserMessageGrace.Store(int64(10 * time.Second))
+	gwBrowserMinRate.Store(256 << 10)
+}
 
 // browserInflight is the bytes of browser messages read and not yet handed
 // to the enclave, across every sealed WebSocket (gwBrowserInflightBudget).
@@ -636,7 +641,8 @@ func (b *browserReader) read(ctx context.Context) (data []byte, reserved int64, 
 		return nil, 0, errNotBinary
 	}
 	start := time.Now()
-	stall := time.AfterFunc(gwBrowserMessageGrace, func() { b.conn.CloseNow() })
+	grace, rate := time.Duration(gwBrowserMessageGrace.Load()), gwBrowserMinRate.Load()
+	stall := time.AfterFunc(grace, func() { b.conn.CloseNow() })
 	defer stall.Stop()
 	var parts [][]byte
 	for {
@@ -649,7 +655,7 @@ func (b *browserReader) read(ctx context.Context) (data []byte, reserved int64, 
 			parts = append(parts, append([]byte(nil), b.chunk[:m]...))
 			// The deadline moves with the bytes received: grace plus one
 			// second per gwBrowserMinRate bytes, measured from the start.
-			allowed := gwBrowserMessageGrace + time.Duration(reserved*int64(time.Second)/gwBrowserMinRate)
+			allowed := grace + time.Duration(reserved*int64(time.Second)/rate)
 			stall.Reset(time.Until(start.Add(allowed)))
 		}
 		if rerr == io.EOF {
