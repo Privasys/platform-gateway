@@ -21,8 +21,10 @@ The gateway never terminates an adopter's hostname and never obtains a certifica
 
 Two further paths:
 
-- **Egress tunnels** (`-tunnels`): an enclave that accepts no inbound connections dials out to the gateway with ALPN `privasys-tunnel/1`; routes whose upstream is `tunnel:<enclave id>` are carried over that tunnel.
+- **Egress tunnels** (`-tunnels`): an enclave that accepts no inbound connections dials out to the gateway with ALPN `privasys-tunnel/1`; routes whose upstream is `tunnel:<enclave id>` are carried over that tunnel. Tunnel opens that reach the control plane for authorisation are rate limited per source (an IPv4 address or an IPv6 /64): a burst of 5, then 10 a minute, and an authorised open does not count. A source past its budget gets `429`.
 - **No route**: a 404 page.
+
+On the terminate path, each request's line and headers are limited to 1 MiB and must arrive within 30 seconds; a request past either is refused before it reaches the enclave. The body, a WebSocket and the sealed mux stream are not affected.
 
 ### PROXY protocol on direct splices
 
