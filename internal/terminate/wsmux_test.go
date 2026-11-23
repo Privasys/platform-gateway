@@ -396,3 +396,170 @@ func TestWSMuxOpenCarriesRouteName(t *testing.T) {
 		t.Fatal("no stream open reached the enclave")
 	}
 }
+
+// TestWSMuxOpenIsSmall proves the stream open, read before the enclave has
+// seen the stream, is held to gwMuxOpenMaxBytes: a larger first message never
+// reaches the enclave.
+func TestWSMuxOpenIsSmall(t *testing.T) {
+	enclaveAddr, opens := fakeEnclave(t, http.StatusSwitchingProtocols)
+	gwCert := selfSignedTLS(t, "app.test")
+	h := New(Options{
+		TLSConfig:    &tls.Config{Certificates: []tls.Certificate{gwCert}},
+		InsecureSkip: true,
+	})
+	gwAddr := startGateway(t, h, routetable.Route{SNI: "app.test", Upstream: enclaveAddr})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	ws, _, err := websocket.Dial(ctx, "wss://app.test/live", &websocket.DialOptions{
+		HTTPClient:   wsClient(t, gwAddr, "app.test"),
+		Subprotocols: []string{sealedWSSubprotocol, "session-abc", "00000000000000cc"},
+	})
+	if err != nil {
+		t.Fatalf("browser dial: %v", err)
+	}
+	defer ws.CloseNow()
+	_ = ws.Write(ctx, websocket.MessageBinary, bytes.Repeat([]byte("a"), gwMuxOpenMaxBytes+1))
+	if _, _, err := ws.Read(ctx); err == nil {
+		t.Fatal("an oversized open was answered")
+	}
+	if opens.Load() != 0 {
+		t.Fatalf("enclave OPEN count = %d, want 0", opens.Load())
+	}
+	waitBudgetReleased(t)
+}
+
+// ackedStream dials a sealed WebSocket through a gateway in front of the fake
+// enclave and returns it once the enclave has answered its open.
+func ackedStream(t *testing.T, ctx context.Context, stream string) *websocket.Conn {
+	t.Helper()
+	enclaveAddr, _ := fakeEnclave(t, http.StatusSwitchingProtocols)
+	gwCert := selfSignedTLS(t, "app.test")
+	h := New(Options{
+		TLSConfig:    &tls.Config{Certificates: []tls.Certificate{gwCert}},
+		InsecureSkip: true,
+	})
+	gwAddr := startGateway(t, h, routetable.Route{SNI: "app.test", Upstream: enclaveAddr})
+	ws, _, err := websocket.Dial(ctx, "wss://app.test/live", &websocket.DialOptions{
+		HTTPClient:   wsClient(t, gwAddr, "app.test"),
+		Subprotocols: []string{sealedWSSubprotocol, "session-abc", stream},
+	})
+	if err != nil {
+		t.Fatalf("browser dial: %v", err)
+	}
+	if err := ws.Write(ctx, websocket.MessageBinary, []byte("open")); err != nil {
+		t.Fatalf("send open: %v", err)
+	}
+	if _, _, err := ws.Read(ctx); err != nil {
+		t.Fatalf("ack: %v", err)
+	}
+	return ws
+}
+
+// TestBrowserBudgetGatewayWide proves a message past the gateway-wide budget
+// closes its socket with 1013 and leaves nothing reserved.
+func TestBrowserBudgetGatewayWide(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	ws := ackedStream(t, ctx, "00000000000000dd")
+	defer ws.CloseNow()
+
+	browserInflight.Add(gwBrowserInflightBudget - 1024)
+	_ = ws.Write(ctx, websocket.MessageBinary, bytes.Repeat([]byte("b"), 4096))
+	_, _, err := ws.Read(ctx)
+	browserInflight.Add(-(gwBrowserInflightBudget - 1024))
+	if websocket.CloseStatus(err) != websocket.StatusTryAgainLater {
+		t.Fatalf("over-budget message: got %v, want close 1013", err)
+	}
+	waitBudgetReleased(t)
+}
+
+// TestBrowserBudgetPerSource proves one client cannot take more than its
+// share, whatever is left of the gateway-wide budget.
+func TestBrowserBudgetPerSource(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	ws := ackedStream(t, ctx, "00000000000000ee")
+	defer ws.CloseNow()
+
+	// The test client dials loopback over IPv4 or IPv6.
+	for _, src := range []string{"127.0.0.1", "::/48"} {
+		if !reserveBrowserBytes(src, gwBrowserSourceBudget-1024) {
+			t.Fatalf("could not pre-reserve the share of %s", src)
+		}
+	}
+	_ = ws.Write(ctx, websocket.MessageBinary, bytes.Repeat([]byte("c"), 4096))
+	_, _, err := ws.Read(ctx)
+	for _, src := range []string{"127.0.0.1", "::/48"} {
+		releaseBrowserBytes(src, gwBrowserSourceBudget-1024)
+	}
+	if websocket.CloseStatus(err) != websocket.StatusTryAgainLater {
+		t.Fatalf("over-share message: got %v, want close 1013", err)
+	}
+	waitBudgetReleased(t)
+}
+
+// TestHalfSentMessageIsCut proves a message that never finishes cannot keep
+// its reservation: the socket is closed once it falls behind the minimum rate and
+// the bytes are released.
+func TestHalfSentMessageIsCut(t *testing.T) {
+	oldGrace, oldRate := gwBrowserMessageGrace, gwBrowserMinRate
+	gwBrowserMessageGrace, gwBrowserMinRate = 300*time.Millisecond, 1<<30
+	defer func() { gwBrowserMessageGrace, gwBrowserMinRate = oldGrace, oldRate }()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	ws := ackedStream(t, ctx, "00000000000000ff")
+	defer ws.CloseNow()
+
+	wr, err := ws.Writer(ctx, websocket.MessageBinary)
+	if err != nil {
+		t.Fatalf("writer: %v", err)
+	}
+	// Enough to cross a frame boundary, never closed: the message stays open.
+	if _, err := wr.Write(bytes.Repeat([]byte("d"), 64<<10)); err != nil {
+		t.Fatalf("partial write: %v", err)
+	}
+	if _, _, err := ws.Read(ctx); err == nil {
+		t.Fatal("a half-sent message kept its socket")
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for browserInflight.Load() != 0 && time.Now().Before(deadline) {
+		time.Sleep(20 * time.Millisecond)
+	}
+	if got := browserInflight.Load(); got != 0 {
+		t.Fatalf("budget not released after the cut: %d", got)
+	}
+}
+
+// waitBudgetReleased waits for every browser reservation to be given back:
+// the gateway releases the bytes of a socket as its goroutines finish.
+func waitBudgetReleased(t *testing.T) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for browserInflight.Load() != 0 && time.Now().Before(deadline) {
+		time.Sleep(20 * time.Millisecond)
+	}
+	if got := browserInflight.Load(); got != 0 {
+		t.Fatalf("budget not released: %d bytes still held", got)
+	}
+}
+
+// TestLargeMessageArrivesWhole proves a large message crosses the chunked
+// read intact and its reservation is released.
+func TestLargeMessageArrivesWhole(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	ws := ackedStream(t, ctx, "0000000000000011")
+	defer ws.CloseNow()
+	ws.SetReadLimit(muxMaxFrame)
+	msg := bytes.Repeat([]byte("0123456789abcdef"), (8<<20)/16)
+	if err := ws.Write(ctx, websocket.MessageBinary, msg); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	_, echo, err := ws.Read(ctx)
+	if err != nil || !bytes.Equal(echo, msg) {
+		t.Fatalf("8 MiB echo: %d bytes (%v)", len(echo), err)
+	}
+	waitBudgetReleased(t)
+}

@@ -81,6 +81,25 @@ const (
 	// gwMuxOpenTimeout bounds the wait for the SDK's sealed stream open
 	// (its first binary message after the browser upgrade).
 	gwMuxOpenTimeout = 10 * time.Second
+	// gwMuxOpenMaxBytes bounds the SDK's sealed stream open, the one browser
+	// message read before the enclave has seen the stream. A real open is a
+	// few dozen bytes.
+	gwMuxOpenMaxBytes = 4 << 10
+	// gwBrowserInflightBudget bounds the browser message bytes held by the
+	// gateway at once, across every sealed WebSocket: a message is read in
+	// gwBrowserReadChunk steps, each reserved from this budget, and released
+	// once it has been handed to the enclave. A socket that would cross it is
+	// closed, so memory follows bytes received and stays bounded however many
+	// sockets are open.
+	gwBrowserInflightBudget = 256 << 20
+	gwBrowserReadChunk      = 64 << 10
+	// gwBrowserSourceBudget is one client's share of that budget (an IPv4
+	// address or an IPv6 /64), so a single client cannot take it all.
+	gwBrowserSourceBudget = 32 << 20
+	// gwMuxAnswerTimeout bounds the wait for the enclave's answer to a stream
+	// open. Longer than the enclave's own dial to the app's socket (10 s),
+	// so a slow app is not cut off by the gateway first.
+	gwMuxAnswerTimeout = 20 * time.Second
 	// muxMaxSIDLen mirrors the enclave's bound on a session id; the frame
 	// header carries the length in one byte.
 	muxMaxSIDLen = 64
@@ -192,14 +211,19 @@ func (h *Handler) serveSealedWSMux(w *connResponseWriter, req *http.Request, rou
 		muxStreamsTotal.WithLabelValues("accept_error").Inc()
 		return
 	}
-	browser.SetReadLimit(muxMaxFrame)
 	defer browser.CloseNow()
 
-	// First browser message is the SDK's sealed stream open (ctr 0).
+	// First browser message is the SDK's sealed stream open (ctr 0). It is
+	// read before the enclave has seen the stream, so the library holds it
+	// to a few KiB; the full message size applies only once the enclave
+	// answers.
+	browser.SetReadLimit(gwMuxOpenMaxBytes)
+	reader := newBrowserReader(browser, browserSource(w.conn.RemoteAddr().String()))
 	openCtx, cancelOpen := context.WithTimeout(context.Background(), gwMuxOpenTimeout)
-	typ, openEnv, err := browser.Read(openCtx)
+	openEnv, held, err := reader.read(openCtx)
 	cancelOpen()
-	if err != nil || typ != websocket.MessageBinary {
+	releaseBrowserBytes(reader.source, held)
+	if err != nil {
 		browser.Close(websocket.StatusProtocolError, "sealed stream open expected")
 		muxStreamsTotal.WithLabelValues("no_open").Inc()
 		return
@@ -210,6 +234,7 @@ func (h *Handler) serveSealedWSMux(w *connResponseWriter, req *http.Request, rou
 		browser:  browser,
 		outbound: make(chan []byte, gwMuxStreamQueue),
 		done:     make(chan struct{}),
+		answered: make(chan struct{}),
 	}
 	if !mc.register(st) {
 		browser.Close(websocket.StatusProtocolError, "duplicate stream id")
@@ -257,6 +282,7 @@ func (h *Handler) serveSealedWSMux(w *connResponseWriter, req *http.Request, rou
 				return
 			case payload = <-st.outbound:
 				st.queued.Add(-int64(len(payload)))
+				st.markAnswered()
 			}
 			wctx, cancel := context.WithTimeout(context.Background(), gwMuxWriteTimeout)
 			err := browser.Write(wctx, websocket.MessageBinary, payload)
@@ -268,10 +294,40 @@ func (h *Handler) serveSealedWSMux(w *connResponseWriter, req *http.Request, rou
 		}
 	}()
 
+	// Nothing more is read from the browser until the enclave has answered
+	// the open: a stream the enclave refuses (no such session, a replayed
+	// open) never gets to send the gateway full-size messages.
+	answerTimer := time.NewTimer(gwMuxAnswerTimeout)
+	select {
+	case <-st.answered:
+		answerTimer.Stop()
+		browser.SetReadLimit(muxMaxFrame)
+	case <-st.done:
+		answerTimer.Stop()
+		return
+	case <-answerTimer.C:
+		_ = mc.writeFrame(muxTypeClose, p.sessionID, p.streamID, encodeMuxClose(websocket.StatusTryAgainLater, ""))
+		st.finish(websocket.StatusTryAgainLater, "enclave did not answer the stream open")
+		muxStreamsTotal.WithLabelValues("open_unanswered").Inc()
+		return
+	}
+
 	// browser -> enclave pump (this goroutine owns the inbound TLS conn).
 	for {
-		typ, data, err := browser.Read(context.Background())
+		data, held, err := reader.read(context.Background())
 		if err != nil {
+			releaseBrowserBytes(reader.source, held)
+			if errors.Is(err, errNotBinary) {
+				browser.Close(websocket.StatusUnsupportedData, "binary sealed frames only")
+				_ = mc.writeFrame(muxTypeClose, p.sessionID, p.streamID, encodeMuxClose(websocket.StatusUnsupportedData, ""))
+				return
+			}
+			if errors.Is(err, errBrowserBudget) {
+				browser.Close(websocket.StatusTryAgainLater, "gateway busy")
+				_ = mc.writeFrame(muxTypeClose, p.sessionID, p.streamID, encodeMuxClose(websocket.StatusGoingAway, ""))
+				muxStreamsTotal.WithLabelValues("budget").Inc()
+				return
+			}
 			code := websocket.CloseStatus(err)
 			if code == -1 {
 				code = websocket.StatusGoingAway
@@ -283,12 +339,9 @@ func (h *Handler) serveSealedWSMux(w *connResponseWriter, req *http.Request, rou
 			}
 			return
 		}
-		if typ != websocket.MessageBinary {
-			browser.Close(websocket.StatusUnsupportedData, "binary sealed frames only")
-			_ = mc.writeFrame(muxTypeClose, p.sessionID, p.streamID, encodeMuxClose(websocket.StatusUnsupportedData, ""))
-			return
-		}
-		if err := mc.writeFrame(muxTypeData, p.sessionID, p.streamID, data); err != nil {
+		err = mc.writeFrame(muxTypeData, p.sessionID, p.streamID, data)
+		releaseBrowserBytes(reader.source, held)
+		if err != nil {
 			browser.Close(websocket.StatusBadGateway, "enclave mux lost")
 			return
 		}
@@ -467,7 +520,157 @@ type gwStream struct {
 	queued atomic.Int64
 	done   chan struct{}
 	once   sync.Once
+	// answered closes when the enclave sends the stream its first frame (the
+	// sealed ack of the open): until then the gateway reads nothing more
+	// from the browser.
+	answered     chan struct{}
+	answeredOnce sync.Once
 }
+
+// markAnswered records that the enclave has answered the stream's open.
+func (st *gwStream) markAnswered() {
+	st.answeredOnce.Do(func() { close(st.answered) })
+}
+
+// A browser message must finish within gwBrowserMessageGrace of its first
+// frame plus one second per gwBrowserMinRate bytes received (a 16 MiB message
+// gets 74 s at the floor rate of 256 KiB/s, about 2 Mbit/s, a slow mobile
+// uplink). A slow or half-sent message would otherwise keep its bytes
+// reserved; holding the budget now takes real upload bandwidth. Variables
+// for tests.
+var (
+	gwBrowserMessageGrace       = 10 * time.Second
+	gwBrowserMinRate      int64 = 256 << 10
+)
+
+// browserInflight is the bytes of browser messages read and not yet handed
+// to the enclave, across every sealed WebSocket (gwBrowserInflightBudget).
+var browserInflight atomic.Int64
+
+// sourceInflight is the same, per client source (an IPv4 address or an IPv6
+// /64), so one client cannot take the whole budget from everyone else
+// (gwBrowserSourceBudget). An entry lives only while it holds bytes.
+var sourceInflight = struct {
+	mu sync.Mutex
+	m  map[string]int64
+}{m: map[string]int64{}}
+
+// errBrowserBudget is returned when a browser message would take the gateway,
+// or its client, past their budget.
+var errBrowserBudget = errors.New("wsmux: browser message budget spent")
+
+// reserveBrowserBytes takes n bytes from the gateway-wide budget and the
+// source's share, or neither.
+func reserveBrowserBytes(source string, n int64) bool {
+	sourceInflight.mu.Lock()
+	defer sourceInflight.mu.Unlock()
+	if sourceInflight.m[source]+n > gwBrowserSourceBudget {
+		return false
+	}
+	if browserInflight.Add(n) > gwBrowserInflightBudget {
+		browserInflight.Add(-n)
+		return false
+	}
+	sourceInflight.m[source] += n
+	return true
+}
+
+// releaseBrowserBytes gives back n bytes reserved for source.
+func releaseBrowserBytes(source string, n int64) {
+	if n == 0 {
+		return
+	}
+	sourceInflight.mu.Lock()
+	defer sourceInflight.mu.Unlock()
+	browserInflight.Add(-n)
+	if left := sourceInflight.m[source] - n; left > 0 {
+		sourceInflight.m[source] = left
+	} else {
+		delete(sourceInflight.m, source)
+	}
+}
+
+// browserSource is the budget share a client counts against: its IPv4
+// address, or its IPv6 /48 (one site, which a single client can split into
+// many /64s), or the whole address when it carries no IP.
+func browserSource(remote string) string {
+	host, _, err := net.SplitHostPort(remote)
+	if err != nil {
+		host = remote
+	}
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return remote
+	}
+	if v4 := ip.To4(); v4 != nil {
+		return v4.String()
+	}
+	return ip.Mask(net.CIDRMask(48, 128)).String() + "/48"
+}
+
+// browserReader reads one sealed WebSocket's browser messages against the
+// budgets. One per socket; its read buffer is reused for every message.
+type browserReader struct {
+	conn   *websocket.Conn
+	source string
+	chunk  []byte
+}
+
+func newBrowserReader(c *websocket.Conn, source string) *browserReader {
+	return &browserReader{conn: c, source: source, chunk: make([]byte, gwBrowserReadChunk)}
+}
+
+// read returns one binary message. Its bytes are reserved exactly as they
+// arrive and kept as separate parts, joined once at the end, so a large
+// message costs one copy, not one per step. The caller releases the
+// returned reservation once the message has been handed on, whatever the
+// error. A message must keep arriving at gwBrowserMinRate after a grace of
+// gwBrowserMessageGrace from its first frame, or the socket is closed: a
+// slow or half-sent message cannot keep its reservation.
+func (b *browserReader) read(ctx context.Context) (data []byte, reserved int64, err error) {
+	typ, r, err := b.conn.Reader(ctx)
+	if err != nil {
+		return nil, 0, err
+	}
+	if typ != websocket.MessageBinary {
+		return nil, 0, errNotBinary
+	}
+	start := time.Now()
+	stall := time.AfterFunc(gwBrowserMessageGrace, func() { b.conn.CloseNow() })
+	defer stall.Stop()
+	var parts [][]byte
+	for {
+		m, rerr := r.Read(b.chunk)
+		if m > 0 {
+			if !reserveBrowserBytes(b.source, int64(m)) {
+				return nil, reserved, errBrowserBudget
+			}
+			reserved += int64(m)
+			parts = append(parts, append([]byte(nil), b.chunk[:m]...))
+			// The deadline moves with the bytes received: grace plus one
+			// second per gwBrowserMinRate bytes, measured from the start.
+			allowed := gwBrowserMessageGrace + time.Duration(reserved*int64(time.Second)/gwBrowserMinRate)
+			stall.Reset(time.Until(start.Add(allowed)))
+		}
+		if rerr == io.EOF {
+			if len(parts) == 1 {
+				return parts[0], reserved, nil
+			}
+			data = make([]byte, 0, reserved)
+			for _, p := range parts {
+				data = append(data, p...)
+			}
+			return data, reserved, nil
+		}
+		if rerr != nil {
+			return nil, reserved, rerr
+		}
+	}
+}
+
+// errNotBinary is returned for a text message, refused before its body is
+// read.
+var errNotBinary = errors.New("wsmux: binary sealed frames only")
 
 // finish closes the browser side exactly once and marks the stream done.
 func (st *gwStream) finish(code websocket.StatusCode, reason string) {
