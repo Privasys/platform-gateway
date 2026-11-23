@@ -638,6 +638,11 @@ func (h *Handler) proxyFor(route routetable.Route) (*httputil.ReverseProxy, erro
 		// headers, which is exactly what makes absence trustworthy.
 		req.Header.Del("X-Privasys-Edge")
 		req.Header.Set("X-Privasys-Edge", "terminate")
+		// The reverse proxy removes every header the Connection header
+		// names, after this function returns. A client could otherwise
+		// name the marker (or the forwarding headers) there and have it
+		// dropped on the way to the enclave.
+		keepGatewayHeaders(req.Header)
 	}
 
 	h.proxies[key] = &upstreamProxy{policyHash: policyHash, rp: rp}
@@ -914,4 +919,35 @@ func writeCORSPreflight(w io.Writer, req *http.Request) {
 			"\r\n",
 		origin, method, headers,
 	)
+}
+
+// keepGatewayHeaders removes from the Connection header every token that
+// names a header the gateway sets for the enclave (X-Privasys-*,
+// X-Forwarded-*, Forwarded, Host), so the hop-by-hop removal that follows
+// cannot drop them. Other tokens (close, keep-alive, upgrade) stay.
+func keepGatewayHeaders(h http.Header) {
+	values := h.Values("Connection")
+	if len(values) == 0 {
+		return
+	}
+	var kept []string
+	for _, v := range values {
+		for _, tok := range strings.Split(v, ",") {
+			tok = strings.TrimSpace(tok)
+			if tok == "" || gatewaySetsHeader(tok) {
+				continue
+			}
+			kept = append(kept, tok)
+		}
+	}
+	h.Del("Connection")
+	if len(kept) > 0 {
+		h.Set("Connection", strings.Join(kept, ", "))
+	}
+}
+
+func gatewaySetsHeader(name string) bool {
+	n := strings.ToLower(name)
+	return strings.HasPrefix(n, "x-privasys-") || strings.HasPrefix(n, "x-forwarded-") ||
+		n == "forwarded" || n == "host"
 }
